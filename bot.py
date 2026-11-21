@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.3-fastbuild"
+BOT_VERSION = "2.4-settings"
 PREM_LIMIT_DEFAULT = int(_env("PREMIUM_LIMIT", "15"))     # построек в сутки у Premium
 PREM_COOLDOWN = int(_env("PREMIUM_COOLDOWN", "5"))        # пауза между построками у Premium, сек
 PREM_CAP = (384, 192, 384)                                # максимальный размер постройки у Premium (X, Y, Z)
@@ -1213,13 +1213,20 @@ def _llm_headers(key):
     return {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
 
-def llm_stream(key, messages, model, on_chunk, cancel, deadline=None):
+def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=False):
     body = {"model": model, "messages": messages, "stream": True}
+    if nothink and not NOTHINK_BAD[0]:
+        body["reasoning"] = {"enabled": False}      # просим шлюз не включать режим рассуждений модели
     if MAX_TOKENS:
         body["max_tokens"] = MAX_TOKENS
     t0 = time.time()
     limit = deadline or (t0 + GEN_TIMEOUT)
     r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 180))
+    if r.status_code in (400, 422) and "reasoning" in body:      # шлюз не знает такой параметр: запоминаем и повторяем без него
+        NOTHINK_BAD[0] = True
+        r.close()
+        body.pop("reasoning", None)
+        r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 180))
     try:
         if r.status_code != 200:
             raise HTTPFail(r.status_code, r.text[:300])
@@ -1266,7 +1273,7 @@ def user_model(uid):
     return m if m in MODEL_NAME else S.d["model"]
 
 
-def llm_complete(messages, on_chunk, cancel, model=None, deadline=None):
+def llm_complete(messages, on_chunk, cancel, model=None, deadline=None, nothink=False):
     model = model if model in MODEL_NAME else S.d["model"]
     if MODEL_COOL.get(model, 0) > time.time():
         raise LLMError("модель «%s» сейчас недоступна. Выбери другую: /model" % mname(model), "model")
@@ -1277,7 +1284,7 @@ def llm_complete(messages, on_chunk, cancel, model=None, deadline=None):
             raise LLMError(last or "нет рабочих API-ключей TokenHarbor", "nokeys")
         tried.add(k["k"])
         try:
-            txt = llm_stream(k["k"], messages, model, on_chunk, cancel, deadline)
+            txt = llm_stream(k["k"], messages, model, on_chunk, cancel, deadline, nothink)
             key_mark(k, ok=k["ok"] + 1)
             return txt
         except (Cancelled, LLMError):
@@ -1317,8 +1324,23 @@ def test_key(key, model=None):
         return False, "сеть: %s" % str(e)[:80]
 
 
-def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False):
-    base = [{"role": "system", "content": SYS_PROMPT_PREM if prem else SYS_PROMPT}] + list(history or [])
+# ===SETTINGS-BLOCK===
+NOTHINK_BAD = [False]          # шлюз ответил 400/422 на параметр reasoning: дальше не шлём его
+
+
+def sys_prompt(prem, think=True):
+    p = SYS_PROMPT_PREM if prem else SYS_PROMPT
+    if think:
+        return p
+    p = p.replace("First think the build through in your head: write a plan in Russian, no markdown (size, materials, roof, windows, lights, details). Then output the final build in ONE ```json block:",
+                  "Do not write any plan, reasoning or explanation. Output ONLY the final build in ONE ```json block, nothing before it:")
+    p = p.replace("Keep the Russian plan short (3-5 lines, no long reasoning). ", "")
+    p = p.replace("Output only the plan and the JSON block, nothing after it.", "Output only the JSON block, nothing after it.")
+    return p + " IMPORTANT: no plan and no thinking text. Start your reply directly with ```json."
+
+
+def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False, think=True):
+    base = [{"role": "system", "content": sys_prompt(prem, think)}] + list(history or [])
     err, best = None, None
     deadline = time.time() + GEN_TIMEOUT          # общий потолок на все попытки вместе
     for i in range(3):
@@ -1326,9 +1348,14 @@ def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False):
             if deadline - time.time() < 90:       # на ещё одну попытку времени не осталось
                 break
             status("🔁 Ответ оборвался, пробую ещё раз (%d/2)…" % i)
-        user = q if not i else q + "\n\n(Прошлый ответ оборвался. Теперь без длинного плана: одна строка плана и сразу один компактный ```json блок. Используй fill/hollow, не больше 120 операций.)"
+        if not i:
+            user = q
+        elif think:
+            user = q + "\n\n(Прошлый ответ оборвался. Теперь без длинного плана: одна строка плана и сразу один компактный ```json блок. Используй fill/hollow, не больше 120 операций.)"
+        else:
+            user = q + "\n\n(Прошлый ответ оборвался. Теперь сразу один компактный ```json блок, без плана. Используй fill/hollow, не больше 120 операций.)"
         try:
-            text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel, model, deadline)
+            text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel, model, deadline, not think)
         except LLMTimeout as e:
             text = e.partial or ""
             try:
@@ -1530,7 +1557,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
         pth = threading.Thread(target=pulse, daemon=True, name="pulse")
         pth.start()
         try:
-            spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem)
+            spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem, user_think(uid))
         finally:
             stop_pulse.set()
             pth.join(timeout=20)
@@ -1601,6 +1628,7 @@ HELP = ("👋 Я строю постройки для Minecraft Bedrock с по�
         "🧱 /build <что построить> — например:\n/build средневековый замок с башнями и рвом\n\n"
         "✏️ /edit <что поменять> — доработать последнюю постройку\n"
         "🤖 /model — выбрать ИИ (4 бесплатные модели)\n"
+        "⚙️ /settings — настройки: режим «Размышления»\n"
         "🛑 /cancel — остановить текущую\n"
         "📊 /me — лимит, статус и твой Premium\n⭐ /premium — Premium: огромные карты, вид изнутри и сверху, 15 в день\n🌍 /world — тема мира (Premium)\n\n"
         "Как это работает: ИИ строит → я присылаю фото-предпросмотр → если нравится, жмёшь «Беру» и получаешь .mcworld "
@@ -1650,6 +1678,37 @@ def on_callback_model(cq, data):
     S.save()
     tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "ИИ: " + mname(mid)})
     tg.safe_edit(chat, cq["message"]["message_id"], model_text(uid), model_markup(mid))
+
+
+def user_think(uid):
+    return bool((S.d["users"].get(str(uid)) or {}).get("think", True))
+
+
+def settings_text(uid):
+    on = user_think(uid)
+    return ("⚙️ Настройки\n\n🧠 Размышления: %s\n\n"
+            "Включены: ИИ сначала пишет короткий план, потом строит. Обычно аккуратнее, но дольше.\n"
+            "Выключены: ИИ сразу строит, без плана. Быстрее, но постройка может получиться проще.") % ("включены ✅" if on else "выключены ❌")
+
+
+def settings_markup(uid):
+    on = user_think(uid)
+    return {"inline_keyboard": [[{"text": "🧠 Отключить размышления" if on else "🧠 Включить размышления", "callback_data": "sg:think"}]]}
+
+
+def cmd_settings(chat, uid):
+    tg.send(chat, settings_text(uid), settings_markup(uid))
+
+
+def on_callback_settings(cq, data):
+    uid, chat = cq["from"]["id"], cq["message"]["chat"]["id"]
+    if data == "sg:think":
+        with S.lock:
+            us = S.d["users"].setdefault(str(uid), {"u": "", "n": "", "first": now_ts(), "day": today(), "cnt": 0, "tot": 0})
+            us["think"] = not us.get("think", True)
+        S.save()
+    tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Размышления: " + ("включены" if user_think(uid) else "выключены")})
+    tg.safe_edit(chat, cq["message"]["message_id"], settings_text(uid), settings_markup(uid))
 
 
 def cmd_me(chat, uid):
@@ -2654,6 +2713,8 @@ def on_message(msg):
         return cmd_edit(cid, uid, arg, msg.get("message_id"))
     if cmd == "me":
         return cmd_me(cid, uid)
+    if cmd in ("settings", "setting", "config"):
+        return cmd_settings(cid, uid)
     if cmd in ("model", "models", "ai"):
         return cmd_model(cid, uid)
     if cmd in PREM_CMDS:
@@ -2687,6 +2748,8 @@ def on_callback(cq):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
     if premium_callback(cq, data):
         return
+    if data.startswith("sg:"):
+        return on_callback_settings(cq, data)
     if data.startswith("md:"):
         return on_callback_model(cq, data)
     on_callback_user(cq, data)
