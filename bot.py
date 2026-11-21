@@ -33,7 +33,11 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.5-chars"
+BOT_VERSION = "2.6-referral"
+TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
+TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
+REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
+REF_MAX = int(_env("REF_MAX", "0"))                       # сколько приглашённых засчитывать максимум (0 = без потолка)
 PREM_LIMIT_DEFAULT = int(_env("PREMIUM_LIMIT", "15"))     # построек в сутки у Premium
 PREM_COOLDOWN = int(_env("PREMIUM_COOLDOWN", "5"))        # пауза между построками у Premium, сек
 PREM_CAP = (384, 192, 384)                                # максимальный размер постройки у Premium (X, Y, Z)
@@ -1487,9 +1491,9 @@ def try_start_build(chat, uid, q, history=None, reply_to=None):
     charge = not is_admin(uid) and not (prem and bool(history))      # у Premium правки бесплатны
     if not is_admin(uid):
         lim = eff_limit(uid)
-        if charge and lim and used_today(uid) >= lim:
+        if charge and lim and used_today(uid) >= lim and bonus_of(uid) <= 0:
             tail = "" if prem else "\n⭐ С Premium — %d построек в день, огромные карты и виды сверху/изнутри: /premium" % S.d["prem_limit"]
-            return tg.send(chat, "📅 На сегодня лимит построек исчерпан (%d). Завтра будет новый.%s" % (lim, tail))
+            return tg.send(chat, "📅 На сегодня лимит построек исчерпан (%d). Завтра будет новый.%s\n🎁 Бесплатные запросы: пригласи друга или выполни задание → /free" % (lim, tail))
         us = S.d["users"].get(str(uid), {})
         wait = (PREM_COOLDOWN if prem else COOLDOWN_SEC) - (time.time() - us.get("lastbuild", 0))
         if wait > 0:
@@ -1504,7 +1508,7 @@ def try_start_build(chat, uid, q, history=None, reply_to=None):
     ev = threading.Event()
     ACTIVE[uid] = ev
     if charge:
-        bump(uid, +1)
+        charge_build(uid)
     if not is_admin(uid):
         with S.lock:
             if str(uid) in S.d["users"]:
@@ -1615,7 +1619,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
     finally:
         stop_pulse.set()
         if refund and charge and not is_admin(uid):
-            bump(uid, -1)
+            refund_charge(uid)
         ACTIVE.pop(uid, None)
         if slot == "free":
             with _plock:
@@ -1631,7 +1635,7 @@ HELP = ("👋 Я строю постройки для Minecraft Bedrock с по�
         "🤖 /model — выбрать ИИ (4 бесплатные модели)\n"
         "⚙️ /settings — настройки: режим «Размышления»\n"
         "🛑 /cancel — остановить текущую\n"
-        "📊 /me — лимит, статус и твой Premium\n⭐ /premium — Premium: огромные карты, вид изнутри и сверху, 15 в день\n🌍 /world — тема мира (Premium)\n\n"
+        "📊 /me — лимит, статус и твой Premium\n🎁 /free — бесплатные запросы: пригласи друга или выполни задание\n⭐ /premium — Premium: огромные карты, вид изнутри и сверху, 15 в день\n🌍 /world — тема мира (Premium)\n\n"
         "Как это работает: ИИ строит → я присылаю фото-предпросмотр → если нравится, жмёшь «Беру» и получаешь .mcworld "
         "(мир для Minecraft Bedrock 1.21.50) с единственной этой постройкой у спавна.")
 
@@ -1723,6 +1727,8 @@ def cmd_me(chat, uid):
         pr = "👑 Premium: " + left_text(uid)
     else:
         pr = "⭐ Premium нет. Карты до 384×384, вид изнутри и сверху, %d построек в день → /premium" % S.d["prem_limit"]
+    if bonus_of(uid):
+        t += "\n🎁 Бонусных запросов: %d (тратятся после дневного лимита)" % bonus_of(uid)
     tg.send(chat, "%s\n%s\nСервис: %s\nИИ: %s (сменить: /model)" % (t, pr, m, mname(user_model(uid))))
 
 
@@ -2683,11 +2689,173 @@ def premium_admin_cmd(chat, uid, cmd, arg, msg):
     return False
 
 
+# ===REFERRAL-BLOCK===
+# ═════════════════════════════════════════════════════════════════════════════
+#  11c. БЕСПЛАТНЫЕ ЗАПРОСЫ: рефералы (1 новый человек = +1) и задание «подпишись на канал» (+2)
+# ═════════════════════════════════════════════════════════════════════════════
+FREE_CMDS = ("free", "bonus", "bonuses", "tasks", "task", "ref", "invite", "referral", "gift")
+BONUS_PAID = set()            # uid, у которых текущая постройка оплачена бонусным запросом (для возврата при ошибке)
+_chk_t = {}                   # uid -> время последней проверки подписки (антиспам)
+
+
+def bonus_of(uid):
+    return max(0, int((S.d["users"].get(str(uid)) or {}).get("bonus", 0) or 0))
+
+
+def add_bonus(uid, n):
+    with S.lock:
+        us = S.d["users"].get(str(uid))
+        if us is None:
+            return False
+        us["bonus"] = max(0, int(us.get("bonus", 0) or 0) + n)
+    S.save()
+    return True
+
+
+def charge_build(uid):
+    """Списывает попытку: сначала дневной лимит, а когда он кончился, — бонусный запрос."""
+    lim = eff_limit(uid)
+    if lim and used_today(uid) >= lim and bonus_of(uid) > 0:
+        add_bonus(uid, -1)
+        BONUS_PAID.add(uid)
+    else:
+        bump(uid, +1)
+
+
+def refund_charge(uid):
+    if uid in BONUS_PAID:
+        BONUS_PAID.discard(uid)
+        add_bonus(uid, +1)
+    else:
+        bump(uid, -1)
+
+
+def ref_link(uid):
+    return "https://t.me/%s?start=ref_%d" % (BOT_USERNAME, uid) if BOT_USERNAME else ""
+
+
+def task_done(uid):
+    return bool((S.d["users"].get(str(uid)) or {}).get("task_sub"))
+
+
+def ref_count(uid):
+    return int((S.d["users"].get(str(uid)) or {}).get("refs", 0) or 0)
+
+
+def free_text(uid):
+    us = S.d["users"].get(str(uid)) or {}
+    link = ref_link(uid)
+    t = "🎁 Бесплатные запросы\n\nСейчас у тебя: %d бонусных. Они тратятся, когда дневной лимит построек закончился.\n\n" % bonus_of(uid)
+    t += "1️⃣ Пригласи друга: +%d бесплатный запрос за каждого нового человека, который запустит бота по твоей ссылке.\n" % REF_BONUS
+    t += "Твоя ссылка:\n%s\nПриглашено: %d\n" % (link, ref_count(uid))
+    if REF_MAX:
+        t += "(засчитывается до %d приглашённых)\n" % REF_MAX
+    t += "\n2️⃣ Задание: подпишись на канал https://t.me/%s и получи +%d бесплатных запроса.\n" % (TASK_CHANNEL, TASK_BONUS)
+    t += "Статус: " + ("✅ выполнено" if us.get("task_sub") else "⬜ не выполнено. Подпишись и нажми «Проверить».")
+    return t
+
+
+def free_markup(uid):
+    rows = []
+    link = ref_link(uid)
+    if link:
+        share = "https://t.me/share/url?url=%s&text=%s" % (requests.utils.quote(link, safe=""), requests.utils.quote("Строю постройки для Minecraft с помощью ИИ. Заходи!", safe=""))
+        rows.append([{"text": "👥 Отправить ссылку другу", "url": share}])
+    if not task_done(uid):
+        rows.append([{"text": "📢 Подписаться на канал", "url": "https://t.me/" + TASK_CHANNEL}])
+        rows.append([{"text": "✅ Проверить подписку", "callback_data": "fr:chk"}])
+    return {"inline_keyboard": rows}
+
+
+def cmd_free(chat, uid):
+    tg.send(chat, free_text(uid), free_markup(uid))
+
+
+def ref_on_start(uid, arg, existed):
+    """Реферал засчитывается только за человека, которого бот раньше не видел, и только один раз."""
+    if existed or not (arg or "").startswith("ref_"):
+        return
+    try:
+        inv = int(arg[4:])
+    except ValueError:
+        return
+    if inv == uid or inv in S.d["banned"]:
+        return
+    give = 0
+    with S.lock:
+        us, iu = S.d["users"].get(str(uid)), S.d["users"].get(str(inv))
+        if us is None or iu is None or us.get("ref_by"):
+            return
+        us["ref_by"] = inv
+        iu["refs"] = int(iu.get("refs", 0) or 0) + 1
+        if not REF_MAX or iu["refs"] <= REF_MAX:
+            give = REF_BONUS
+            iu["bonus"] = int(iu.get("bonus", 0) or 0) + give
+        total, nm = int(iu.get("bonus", 0) or 0), (us.get("n") or us.get("u") or "новый игрок")
+    S.save()
+    try:
+        if give:
+            tg.send(inv, "🎉 По твоей ссылке пришёл новый человек (%s)!\n+%d бесплатный запрос. Бонусных сейчас: %d.\nВсе способы: /free" % (nm, give, total))
+        else:
+            tg.send(inv, "🎉 По твоей ссылке пришёл новый человек (%s)! Лимит наград за приглашения (%d) уже исчерпан." % (nm, REF_MAX))
+    except Exception:
+        pass
+
+
+def check_subscription(uid):
+    """(True, '') — подписан; (False, '') — не подписан; (None, причина) — проверить не удалось."""
+    try:
+        m = tg.call("getChatMember", {"chat_id": "@" + TASK_CHANNEL, "user_id": uid}, tries=2)
+    except TGError as e:
+        d = str(e).lower()
+        if "user not found" in d or "participant_id_invalid" in d:
+            return False, ""
+        return None, str(e)
+    st = (m or {}).get("status")
+    if st in ("creator", "administrator", "member"):
+        return True, ""
+    if st == "restricted":
+        return bool(m.get("is_member")), ""
+    return False, ""
+
+
+def on_callback_free(cq, data):
+    uid, chat, mid = cq["from"]["id"], cq["message"]["chat"]["id"], cq["message"]["message_id"]
+    if data != "fr:chk":
+        return _ans(cq)
+    if task_done(uid):
+        _ans(cq, "Задание уже выполнено ✅")
+        return tg.safe_edit(chat, mid, free_text(uid), free_markup(uid))
+    if time.time() - _chk_t.get(uid, 0) < 3:
+        return _ans(cq, "Секунду…")
+    _chk_t[uid] = time.time()
+    ok, why = check_subscription(uid)
+    if ok is None:
+        log.warning("проверка подписки на @%s не удалась: %s", TASK_CHANNEL, why)
+        notify_admins_once("taskchan", "⚠️ Не могу проверить подписку на @%s: %s\nЧтобы проверка работала, @%s должен быть каналом/группой, а бот — его администратором (Telegram не даёт боту видеть подписчиков иначе). "
+                                       "Если это не канал, а бот, задание не сработает: смени канал переменной TASK_CHANNEL." % (TASK_CHANNEL, why[:150], TASK_CHANNEL), every=3600)
+        return _ans(cq, "Не получилось проверить подписку. Попробуй позже, админ уже в курсе.", True)
+    if not ok:
+        return _ans(cq, "Подписки пока не вижу. Подпишись на канал и нажми «Проверить» ещё раз.", True)
+    with S.lock:
+        us = S.d["users"].get(str(uid))
+        first = us is not None and not us.get("task_sub")
+        if first:
+            us["task_sub"] = now_ts()
+            us["bonus"] = int(us.get("bonus", 0) or 0) + TASK_BONUS
+    if not first:
+        return _ans(cq, "Задание уже выполнено ✅")
+    S.save()
+    _ans(cq, "Готово! +%d бесплатных запроса 🎉" % TASK_BONUS, True)
+    tg.safe_edit(chat, mid, free_text(uid), free_markup(uid))
+
+
 def on_message(msg):
     u, chat = msg.get("from"), msg["chat"]
     if not u or u.get("is_bot"):
         return
     uid, cid = u["id"], chat["id"]
+    existed = str(uid) in S.d["users"]
     touch_user(u)
     text = (msg.get("text") or "").strip()
     if not text.startswith("/"):
@@ -2704,8 +2872,14 @@ def on_message(msg):
     arg = rest.strip()
     if uid in S.d["banned"] and not is_admin(uid):
         return
-    if cmd in ("start", "help"):
+    if cmd == "start":
+        if chat["type"] == "private":
+            ref_on_start(uid, arg, existed)
         return tg.send(cid, HELP)
+    if cmd == "help":
+        return tg.send(cid, HELP)
+    if cmd in FREE_CMDS:
+        return cmd_free(cid, uid)
     if cmd == "id":
         return tg.send(cid, "Твой Telegram ID: %d" % uid)
     if cmd == "build":
@@ -2747,6 +2921,8 @@ def on_callback(cq):
         return on_callback_broadcast(cq, data)
     if cq["from"]["id"] in S.d["banned"] and not is_admin(cq["from"]["id"]):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
+    if data.startswith("fr:"):
+        return on_callback_free(cq, data)
     if premium_callback(cq, data):
         return
     if data.startswith("sg:"):
