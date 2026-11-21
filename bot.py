@@ -33,7 +33,20 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-TH_MODEL       = _env("TH_MODEL", "claude-haiku-5.5:free")
+BOT_VERSION = "2.1-models"
+
+# Только эти бесплатные модели TokenHarbor. Игрок выбирает любую через /model.
+MODELS = [
+    ("deepseek-v4-flash:free",     "DeepSeek V4 Flash"),
+    ("deepseek-v4.1-flash:free",   "DeepSeek V4.1 Flash"),
+    ("mimo-v2.5:free",             "MiMo V2.5"),
+    ("mimo-v2.6-flash:free",       "MiMo V2.6 Flash"),
+]
+MODEL_IDS = [m[0] for m in MODELS]
+MODEL_NAME = dict(MODELS)
+TH_MODEL       = _env("TH_MODEL", MODEL_IDS[0])
+if TH_MODEL not in MODEL_NAME:
+    TH_MODEL = MODEL_IDS[0]
 TH_KEYS_ENV    = [k.strip() for k in re.split(r"[,\s]+", _env("TH_KEYS", "")) if k.strip()]
 DATA_DIR       = _env("DATA_DIR", "./data")
 DAILY_LIMIT    = int(_env("DAILY_LIMIT", "5"))        # построек на человека в сутки (0 = без лимита)
@@ -839,6 +852,11 @@ class State:
             d = default_state()
             d.update({k: v for k, v in data.items() if k in d})
             d["stats"] = {**default_state()["stats"], **(d.get("stats") or {})}
+            if d.get("model") not in MODEL_NAME:        # старая/чужая модель из копии → разрешённая
+                d["model"] = TH_MODEL
+            for u in (d.get("users") or {}).values():
+                if u.get("model") and u["model"] not in MODEL_NAME:
+                    u.pop("model", None)
             self.d = d
             self._write()
 
@@ -1163,7 +1181,22 @@ def llm_stream(key, messages, model, on_chunk, cancel):
         r.close()
 
 
-def llm_complete(messages, on_chunk, cancel):
+MODEL_COOL = {}               # модель -> до какого времени считаем её недоступной (в памяти)
+
+
+def mname(model):
+    return MODEL_NAME.get(model, model)
+
+
+def user_model(uid):
+    m = (S.d["users"].get(str(uid)) or {}).get("model")
+    return m if m in MODEL_NAME else S.d["model"]
+
+
+def llm_complete(messages, on_chunk, cancel, model=None):
+    model = model if model in MODEL_NAME else S.d["model"]
+    if MODEL_COOL.get(model, 0) > time.time():
+        raise LLMError("модель «%s» сейчас недоступна. Выбери другую: /model" % mname(model), "model")
     tried, last = set(), ""
     while True:
         k = pick_key(tried)
@@ -1171,7 +1204,7 @@ def llm_complete(messages, on_chunk, cancel):
             raise LLMError(last or "нет рабочих API-ключей TokenHarbor", "nokeys")
         tried.add(k["k"])
         try:
-            txt = llm_stream(k["k"], messages, S.d["model"], on_chunk, cancel)
+            txt = llm_stream(k["k"], messages, model, on_chunk, cancel)
             key_mark(k, ok=k["ok"] + 1)
             return txt
         except (Cancelled, LLMError):
@@ -1182,27 +1215,28 @@ def llm_complete(messages, on_chunk, cancel):
                 key_mark(k, off=True, why="HTTP 401: ключ не принят", err=k["err"] + 1)
                 notify_admins_once("keyoff" + mask(k["k"]), "🔑 Ключ %s отключён: TokenHarbor его не принял (HTTP 401).\nПроверь /keys и добавь новый: /addkey <ключ>" % mask(k["k"]))
             elif e.code in (402, 403, 404):
-                # у TokenHarbor так отвечает «модель платная / недоступна на тарифе ключа» (как в BuildAI v9)
-                key_mark(k, cool=time.time() + 600, why="HTTP %s: модель %s недоступна на тарифе ключа или лимит, пауза 10 мин" % (e.code, S.d["model"]), err=k["err"] + 1)
-                last = "модель %s сейчас недоступна на тарифе ключей (HTTP %s)" % (S.d["model"], e.code)
-                notify_admins_once("model" + str(e.code), "💸 TokenHarbor ответил HTTP %s на модель %s: она платная/недоступна для ключа или закончился лимит.\nСмени модель: /setmodel <id> (бесплатные у них с суффиксом :free) и проверь: /testkeys" % (e.code, S.d["model"]))
+                # у TokenHarbor так отвечает «модель платная / недоступна на тарифе ключа» (как в BuildAI v9):
+                # гасим не ключ, а саму модель на 10 минут; остальные модели продолжают работать
+                MODEL_COOL[model] = time.time() + 600
+                notify_admins_once("model%s%s" % (e.code, model), "💸 TokenHarbor ответил HTTP %s на модель %s: она недоступна для ключа или закончился лимит. Пауза для неё 10 минут, остальные модели работают." % (e.code, model))
+                raise LLMError("модель «%s» сейчас недоступна. Выбери другую: /model" % mname(model), "model")
             elif e.code == 429:
                 key_mark(k, cool=time.time() + 90, why="HTTP 429, пауза 90 с", err=k["err"] + 1)
             elif e.code >= 500:
                 key_mark(k, cool=time.time() + 30, why="HTTP %s, пауза 30 с" % e.code, err=k["err"] + 1)
             else:
-                notify_admins_once("badreq", "⚠️ TokenHarbor отклонил запрос (HTTP %s): %s\nВозможно, модель %s больше недоступна: /setmodel <id>" % (e.code, e.body[:200], S.d["model"]))
+                notify_admins_once("badreq" + model, "⚠️ TokenHarbor отклонил запрос (HTTP %s): %s\nМодель: %s" % (e.code, e.body[:200], model))
                 raise LLMError("Сервис ИИ отклонил запрос (HTTP %s). Админ уже уведомлён." % e.code, "bad")
         except requests.RequestException as e:
             last = "нет связи с TokenHarbor"
             key_mark(k, cool=time.time() + 15, why="сеть: %s" % str(e)[:60])
 
 
-def test_key(key):
+def test_key(key, model=None):
     """Проверка ключа одним крошечным запросом. -> (ok, текст)"""
     try:
         r = requests.post(TH_URL, headers=_llm_headers(key), timeout=30,
-                          json={"model": S.d["model"], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
+                          json={"model": model or S.d["model"], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1})
         if r.status_code == 200:
             return True, "работает"
         return False, "HTTP %s %s" % (r.status_code, r.text[:100].replace("\n", " "))
@@ -1210,14 +1244,14 @@ def test_key(key):
         return False, "сеть: %s" % str(e)[:80]
 
 
-def generate_spec(q, history, on_chunk, cancel, status):
+def generate_spec(q, history, on_chunk, cancel, status, model=None):
     base = [{"role": "system", "content": SYS_PROMPT}] + list(history or [])
     err, best = None, None
     for i in range(3):
         if i:
             status("🔁 Ответ оборвался, пробую ещё раз (%d/2)…" % i)
         user = q if not i else q + "\n\n(Прошлый ответ оборвался. Теперь без длинного плана: одна строка плана и сразу один компактный ```json блок. Используй fill/hollow, не больше 120 операций.)"
-        text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel)
+        text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel, model)
         try:
             return parse_spec(text), False
         except ValueError as e:
@@ -1365,13 +1399,14 @@ def job_build(chat, uid, q, history, cancel):
 
         with S.lock:
             S.d["stats"]["builds"] += 1
-        spec, part = generate_spec(q, history, on_chunk, cancel, status)
+        model = user_model(uid)
+        spec, part = generate_spec(q, history, on_chunk, cancel, status, model)
         r = run_spec(spec)
         status("🎨 Рисую предпросмотр…")
         png = render_preview(r)
         hist = [{"role": "user", "content": q}, {"role": "assistant", "content": json.dumps({"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, ensure_ascii=False)}]
         bid = store_build(uid, q, spec, hist)
-        cap = "✅ %s\n🧱 %d блоков · %d×%d×%d" % (spec.get("name") or "Постройка", r.n, *r.d)
+        cap = "✅ %s\n🧱 %d блоков · %d×%d×%d\n🤖 %s (сменить: /model)" % (spec.get("name") or "Постройка", r.n, *r.d, mname(model))
         if part:
             cap += "\n⚠ Ответ ИИ оборвался, показана собранная часть. Нажми «Заново» или попроси достроить: /edit …"
         if r.unk:
@@ -1423,6 +1458,7 @@ def job_build(chat, uid, q, history, cancel):
 HELP = ("👋 Я строю постройки для Minecraft Bedrock с помощью ИИ.\n\n"
         "🧱 /build <что построить> — например:\n/build средневековый замок с башнями и рвом\n\n"
         "✏️ /edit <что поменять> — доработать последнюю постройку\n"
+        "🤖 /model — выбрать ИИ (4 бесплатные модели)\n"
         "🛑 /cancel — остановить текущую\n"
         "📊 /me — сколько построек осталось сегодня\n\n"
         "Как это работает: ИИ строит → я присылаю фото-предпросмотр → если нравится, жмёшь «Беру» и получаешь .mcworld "
@@ -1447,6 +1483,33 @@ def cmd_edit(chat, uid, arg, reply_to):
     try_start_build(chat, uid, q, b["h"], reply_to)
 
 
+def model_markup(cur):
+    rows = [[{"text": ("✅ " if mid == cur else "") + title, "callback_data": "md:%d" % i}] for i, (mid, title) in enumerate(MODELS)]
+    return {"inline_keyboard": rows}
+
+
+def model_text(uid):
+    return "🤖 Выбери ИИ, который будет строить. Все модели бесплатные; если одна строит плохо или занята — попробуй другую.\n\nСейчас: %s" % mname(user_model(uid))
+
+
+def cmd_model(chat, uid):
+    tg.send(chat, model_text(uid), model_markup(user_model(uid)))
+
+
+def on_callback_model(cq, data):
+    uid, chat = cq["from"]["id"], cq["message"]["chat"]["id"]
+    try:
+        mid = MODEL_IDS[int(data[3:])]
+    except (ValueError, IndexError):
+        return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"]})
+    with S.lock:
+        us = S.d["users"].setdefault(str(uid), {"u": "", "n": "", "first": now_ts(), "day": today(), "cnt": 0, "tot": 0})
+        us["model"] = mid
+    S.save()
+    tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "ИИ: " + mname(mid)})
+    tg.safe_edit(chat, cq["message"]["message_id"], model_text(uid), model_markup(mid))
+
+
 def cmd_me(chat, uid):
     lim = S.d["limit"]
     if is_admin(uid) or not lim:
@@ -1454,7 +1517,7 @@ def cmd_me(chat, uid):
     else:
         t = "Сегодня использовано %d из %d построек." % (used_today(uid), lim)
     m = {"on": "🟢 работает", "off": "⛔ выключен", "update": "🔧 на обновлении"}[S.d["mode"]]
-    tg.send(chat, "%s\nСервис: %s" % (t, m))
+    tg.send(chat, "%s\nСервис: %s\nИИ: %s (сменить: /model)" % (t, m, mname(user_model(uid))))
 
 
 def on_callback_user(cq, data):
@@ -1516,7 +1579,7 @@ ADMIN_HELP = (
     "/keys — список\n"
     "/delkey <номер или последние 4 символа>\n"
     "/testkeys — проверить все ключи (рабочие вернутся в строй)\n"
-    "/setmodel <id> — модель (сейчас: %s)\n\n"
+    "/setmodel <номер> — модель по умолчанию (сейчас: %s). Игроки выбирают сами через /model\n\n"
     "Люди:\n"
     "/limit <число> — построек на человека в сутки (0 = без лимита)\n"
     "/ban <id|@ник> · /unban <id|@ник> · /banned\n"
@@ -1654,15 +1717,21 @@ def admin_command(chat, uid, cmd, arg, msg):
             lines.append("%d. %s — %s %s" % (i, mask(k["k"]), "🟢" if ok else "🔴", info))
         S.save()
         return tg.send(chat, "Проверка ключей:\n" + "\n".join(lines))
-    if cmd in ("setmodel", "model"):
-        if not A:
-            return tg.send(chat, "Модель сейчас: %s\nСменить: /setmodel <id>" % S.d["model"])
+    if cmd == "setmodel":
+        lst = "\n".join("%d. %s — %s" % (i + 1, mid, t) for i, (mid, t) in enumerate(MODELS))
+        pick = None
+        if A.split():
+            w = A.split()[0]
+            pick = MODEL_IDS[int(w) - 1] if w.isdigit() and 1 <= int(w) <= len(MODELS) else (w if w in MODEL_NAME else None)
+        if not pick:
+            return tg.send(chat, "Модель по умолчанию (для тех, кто не выбрал свою): %s\n\nДоступные:\n%s\n\nСменить: /setmodel <номер>\nИгроки выбирают сами: /model" % (S.d["model"], lst))
         with S.lock:
-            S.d["model"] = A.split()[0][:80]
+            S.d["model"] = pick
+            MODEL_COOL.clear()
             for x in S.d["keys"]:
                 x["cool"] = 0
         S.save()
-        return tg.send(chat, "✅ Модель: %s\nПроверить ключи на ней: /testkeys" % S.d["model"])
+        return tg.send(chat, "✅ Модель по умолчанию: %s\nПроверить ключи: /testkeys" % pick)
     if cmd == "limit":
         if not A.isdigit():
             return tg.send(chat, "Сейчас: %s в сутки. Изменить: /limit <число> (0 = без лимита)" % (S.d["limit"] or "без лимита"))
@@ -1762,6 +1831,8 @@ def on_message(msg):
         return cmd_edit(cid, uid, arg, msg.get("message_id"))
     if cmd == "me":
         return cmd_me(cid, uid)
+    if cmd in ("model", "models", "ai"):
+        return cmd_model(cid, uid)
     if cmd == "cancel":
         ev = ACTIVE.get(uid)
         if ev:
@@ -1770,7 +1841,7 @@ def on_message(msg):
         return tg.send(cid, "Сейчас ничего не строится.")
     if is_admin(uid):
         if chat["type"] != "private":
-            if cmd in ("admin", "adm", "panel", "off", "on", "update", "addkey", "keys", "delkey", "testkeys", "setmodel", "model", "limit", "ban", "unban", "banned", "broadcast", "backup", "stats", "status"):
+            if cmd in ("admin", "adm", "panel", "off", "on", "update", "addkey", "keys", "delkey", "testkeys", "setmodel", "limit", "ban", "unban", "banned", "broadcast", "backup", "stats", "status"):
                 return tg.send(cid, "🔒 Админ-команды работают только в личке с ботом.")
             return
         admin_command(cid, uid, cmd, arg, msg)
@@ -1788,6 +1859,8 @@ def on_callback(cq):
         return on_callback_broadcast(cq, data)
     if cq["from"]["id"] in S.d["banned"] and not is_admin(cq["from"]["id"]):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
+    if data.startswith("md:"):
+        return on_callback_model(cq, data)
     on_callback_user(cq, data)
 
 
@@ -1816,7 +1889,8 @@ SECRET = _env("WEBHOOK_SECRET") or hashlib.sha256(("wh" + BOT_TOKEN).encode()).h
 
 
 class Hook(BaseHTTPRequestHandler):
-    def _ok(self, body=b"BuildAI bot is running"):
+    def _ok(self, body=None):
+        body = body or ("BuildAI bot is running v%s" % BOT_VERSION).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
