@@ -33,7 +33,11 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.1-models"
+BOT_VERSION = "2.2-premium"
+PREM_LIMIT_DEFAULT = int(_env("PREMIUM_LIMIT", "15"))     # построек в сутки у Premium
+PREM_COOLDOWN = int(_env("PREMIUM_COOLDOWN", "5"))        # пауза между построками у Premium, сек
+PREM_CAP = (384, 192, 384)                                # максимальный размер постройки у Premium (X, Y, Z)
+FREE_CAP = (128, 128, 128)
 
 # Только эти бесплатные модели TokenHarbor. Игрок выбирает любую через /model.
 MODELS = [
@@ -185,12 +189,13 @@ class _Budget(Exception):
     pass
 
 
-def expand(lst, off=None, depth=0, budget=None):
+def expand(lst, off=None, depth=0, budget=None, cap=30000):
     """Раскрывает сложные операции в простые fill/hollow/set. Возвращает (список, bad)."""
     out = []
     bad = 0
     off = off or [0, 0, 0]
-    CAP = 30000
+    CAP = cap
+    BLIM = 400000 * cap // 30000
     if budget is None:
         budget = [0]
 
@@ -199,7 +204,7 @@ def expand(lst, off=None, depth=0, budget=None):
 
     def push(t, b, a, c):
         budget[0] += 1
-        if budget[0] > 400000:
+        if budget[0] > BLIM:
             raise _Budget()
         if len(out) < CAP:
             out.append({"t": t, "b": b, "a": [rd(v + off[i]) for i, v in enumerate(a)],
@@ -282,7 +287,7 @@ def expand(lst, off=None, depth=0, budget=None):
                 a2[ax] = rd(2 * pl - e["a"][ax])
                 c2[ax] = rd(2 * pl - e["c"][ax])
                 budget[0] += 1
-                if budget[0] > 400000:
+                if budget[0] > BLIM:
                     raise _Budget()
                 if len(out) < CAP:
                     out.append({"t": e["t"], "b": e["b"], "a": a2, "c": c2})
@@ -294,7 +299,7 @@ def expand(lst, off=None, depth=0, budget=None):
                 bad += 1
                 continue
             for i in range(n):
-                sub, sb = expand(o["ops"], [off[0] + d[0] * i, off[1] + d[1] * i, off[2] + d[2] * i], depth + 1, budget)
+                sub, sb = expand(o["ops"], [off[0] + d[0] * i, off[1] + d[1] * i, off[2] + d[2] * i], depth + 1, budget, cap)
                 bad += sb
                 for e in sub:
                     if len(out) < CAP:
@@ -304,13 +309,14 @@ def expand(lst, off=None, depth=0, budget=None):
     return out, bad
 
 
-def run_spec(spec):
+def run_spec(spec, prem=False):
     """Превращает JSON ИИ в сетку блоков. Результат: ops, pal, g[x,y,z], d=(X,Y,Z), n, unk, bad."""
     if not isinstance(spec, dict):
         raise ValueError("ИИ вернул не JSON-объект")
+    cap = PREM_CAP if prem else FREE_CAP
     unk, ops = set(), []
     try:
-        ex, bad = expand(spec.get("ops") or [])
+        ex, bad = expand(spec.get("ops") or [], cap=(150000 if prem else 30000))
     except _Budget:
         raise ValueError("Постройка слишком сложная (слишком много операций)")
     for o in ex:
@@ -334,10 +340,10 @@ def run_spec(spec):
         a, c = [], []
         for i in range(3):
             p, q = o["a"][i] - mn[i], o["c"][i] - mn[i]
-            a.append(max(0, min(127, min(p, q))))
-            c.append(max(0, min(127, max(p, q))))
+            a.append(max(0, min(cap[i] - 1, min(p, q))))
+            c.append(max(0, min(cap[i] - 1, max(p, q))))
         o["a"], o["c"] = a, (a if o["t"] == "set" else c)
-    T = np.zeros((128, 128, 128), dtype=np.uint16)
+    T = np.zeros(cap, dtype=np.uint16)
     pal, pi = ["air"], {"air": 0}
     for o in ops:
         v = pi.get(o["b"])
@@ -727,12 +733,13 @@ WORLD_MIN_Y = -64
 SPAWN = (0, -60, 0)             # игрок появляется здесь (поверхность травы на y=-61)
 
 
-def build_world_files(r, title):
+def build_world_files(r, title, opts=None):
     """Возвращает {путь внутри архива: bytes} для .mcworld."""
     X, Y, Z = r.d
     BX, BY, BZ = 8, -60, -(Z // 2)                       # угол постройки в мире
     # палитра мира
-    names = ["air", "bedrock", "dirt", "grass_block"]
+    ground = (opts or {}).get("g") or "grass_block"
+    names = ["air", "bedrock", "dirt", ground]
     wp = {n: i for i, n in enumerate(names)}
     lut = np.zeros(len(r.pal), dtype=np.uint16)
     for i, n in enumerate(r.pal):
@@ -773,7 +780,7 @@ def build_world_files(r, title):
     # level.dat
     layers = json.dumps({"biome_id": 1, "block_layers": [{"block_name": "minecraft:bedrock", "count": 1},
                                                           {"block_name": "minecraft:dirt", "count": 2},
-                                                          {"block_name": "minecraft:grass_block", "count": 1}],
+                                                          {"block_name": "minecraft:" + ground, "count": 1}],
                          "encoding_version": 6, "structure_options": None, "world_version": "version.post_1_18"},
                         separators=(",", ":"))
     now = int(time.time())
@@ -786,7 +793,7 @@ def build_world_files(r, title):
         n_int("NetherScale", 8), n_int("NetworkVersion", 766), n_int("Platform", 2), n_int("PlatformBroadcastIntent", 3),
         n_long("RandomSeed", 20261121), B("SpawnV1Villagers", 0),
         n_int("SpawnX", SPAWN[0]), n_int("SpawnY", SPAWN[1]), n_int("SpawnZ", SPAWN[2]),
-        n_int("StorageVersion", 10), n_long("Time", 6000), n_int("XBLBroadcastIntent", 3),
+        n_int("StorageVersion", 10), n_long("Time", int((opts or {}).get("t", 6000))), n_int("XBLBroadcastIntent", 3),
         n_str("baseGameVersion", "*"), B("bonusChestEnabled", 0), B("bonusChestSpawned", 0),
         B("commandblockoutput", 1), B("commandblocksenabled", 1), B("commandsEnabled", 1), n_long("currentTick", 0),
         B("dodaylightcycle", 0), B("doentitydrops", 1), B("dofiretick", 0), B("doimmediaterespawn", 0), B("doinsomnia", 0),
@@ -813,8 +820,8 @@ def build_world_files(r, title):
     return files
 
 
-def build_mcworld_bytes(r, title):
-    files = build_world_files(r, title)
+def build_mcworld_bytes(r, title, opts=None):
+    files = build_world_files(r, title, opts)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for name, data in files.items():
@@ -836,6 +843,7 @@ START_TS = time.time()
 def default_state():
     return {"v": 1, "mode": "on", "mode_msg": "", "model": TH_MODEL, "keys": [], "limit": DAILY_LIMIT,
             "banned": [], "users": {}, "builds": {}, "last": {}, "seq": 0, "bk_msg": 0,
+            "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
             "stats": {"builds": 0, "ok": 0, "fail": 0, "worlds": 0, "structs": 0}}
 
 
@@ -1244,8 +1252,8 @@ def test_key(key, model=None):
         return False, "сеть: %s" % str(e)[:80]
 
 
-def generate_spec(q, history, on_chunk, cancel, status, model=None):
-    base = [{"role": "system", "content": SYS_PROMPT}] + list(history or [])
+def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False):
+    base = [{"role": "system", "content": SYS_PROMPT_PREM if prem else SYS_PROMPT}] + list(history or [])
     err, best = None, None
     for i in range(3):
         if i:
@@ -1288,6 +1296,7 @@ def touch_user(u):
             us["u"], us["n"] = un, nm
             changed = True
         us["last"] = now_ts()
+        _apply_prem_wait(uid, un)
         if us["day"] != today():
             us["day"], us["cnt"] = today(), 0
     if changed:
@@ -1325,9 +1334,17 @@ def clean_text(s):
     return re.sub(r"\s+", " ", s).strip()[:400]
 
 
-def build_markup(bid):
-    return {"inline_keyboard": [[{"text": "✅ Беру — пришли мир (.mcworld)", "callback_data": "ok:" + bid}],
-                                [{"text": "🔁 Заново", "callback_data": "re:" + bid}, {"text": "📦 .mcstructure", "callback_data": "st:" + bid}]]}
+def build_markup(bid, prem=False):
+    rows = [[{"text": "✅ Беру — пришли мир (.mcworld)", "callback_data": "ok:" + bid}]]
+    if prem:
+        rows.append([{"text": "🏠 Вид изнутри", "callback_data": "in:" + bid}, {"text": "🗺 Вид сверху", "callback_data": "td:" + bid}])
+        rows.append([{"text": "🔎 ×2", "callback_data": "zm:%s:2" % bid}, {"text": "🔎 ×3", "callback_data": "zm:%s:3" % bid},
+                     {"text": "✨ Улучшить", "callback_data": "up:" + bid}])
+    else:
+        rows.append([{"text": "🔒 Вид изнутри", "callback_data": "pl:in"}, {"text": "🔒 Вид сверху", "callback_data": "pl:td"}])
+        rows.append([{"text": "⭐ Premium: карты до 384×384, 15 в день", "callback_data": "pl:pm"}])
+    rows.append([{"text": "🔁 Заново", "callback_data": "re:" + bid}, {"text": "📦 .mcstructure", "callback_data": "st:" + bid}])
+    return {"inline_keyboard": rows}
 
 
 def new_build_id():
@@ -1336,10 +1353,11 @@ def new_build_id():
         return format(S.d["seq"], "x") + secrets.token_hex(2)
 
 
-def store_build(uid, q, spec, hist):
+def store_build(uid, q, spec, hist, prem=False, zoom=1):
     bid = new_build_id()
     with S.lock:
-        S.d["builds"][bid] = {"uid": uid, "q": q, "ts": now_ts(), "spec": {"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, "h": hist}
+        S.d["builds"][bid] = {"uid": uid, "q": q, "ts": now_ts(), "spec": {"name": spec.get("name", "build"), "ops": spec.get("ops", [])},
+                              "h": hist, "prem": bool(prem), "zoom": int(zoom)}
         S.d["last"][str(uid)] = bid
         if len(S.d["builds"]) > 60:
             for old in sorted(S.d["builds"], key=lambda b: S.d["builds"][b]["ts"])[:len(S.d["builds"]) - 60]:
@@ -1357,34 +1375,42 @@ def try_start_build(chat, uid, q, history=None, reply_to=None):
         return tg.send(chat, "🚫 Доступ закрыт.")
     if uid in ACTIVE:
         return tg.send(chat, "⏳ Твоя прошлая постройка ещё делается. Дождись её или /cancel.")
+    prem = is_prem(uid)
+    charge = not is_admin(uid) and not (prem and bool(history))      # у Premium правки бесплатны
     if not is_admin(uid):
-        lim = S.d["limit"]
-        if lim and used_today(uid) >= lim:
-            return tg.send(chat, "📅 На сегодня лимит построек исчерпан (%d). Завтра будет новый." % lim)
+        lim = eff_limit(uid)
+        if charge and lim and used_today(uid) >= lim:
+            tail = "" if prem else "\n⭐ С Premium — %d построек в день, огромные карты и виды сверху/изнутри: /premium" % S.d["prem_limit"]
+            return tg.send(chat, "📅 На сегодня лимит построек исчерпан (%d). Завтра будет новый.%s" % (lim, tail))
         us = S.d["users"].get(str(uid), {})
-        wait = COOLDOWN_SEC - (time.time() - us.get("lastbuild", 0))
+        wait = (PREM_COOLDOWN if prem else COOLDOWN_SEC) - (time.time() - us.get("lastbuild", 0))
         if wait > 0:
-            return tg.send(chat, "⏱ Подожди ещё %d с перед следующей постройкой." % math.ceil(wait))
-    with _plock:
-        if PENDING[0] >= WORKERS + MAX_QUEUE:
-            return tg.send(chat, "🚦 Сейчас много желающих, очередь заполнена. Попробуй через пару минут.")
-        PENDING[0] += 1
-        pos = PENDING[0]
+            return tg.send(chat, "⏱ Подожди ещё %d с перед следующей постройкой.%s" % (math.ceil(wait), "" if prem else "\n⭐ У Premium пауза всего %d с: /premium" % PREM_COOLDOWN))
+    pos = 0
+    if not prem:
+        with _plock:
+            if PENDING[0] >= WORKERS + MAX_QUEUE:
+                return tg.send(chat, "🚦 Сейчас много желающих, очередь заполнена. Попробуй через пару минут.\n⭐ У Premium своя очередь без ожидания: /premium")
+            PENDING[0] += 1
+            pos = PENDING[0]
     ev = threading.Event()
     ACTIVE[uid] = ev
-    if not is_admin(uid):
+    if charge:
         bump(uid, +1)
+    if not is_admin(uid):
         with S.lock:
-            S.d["users"][str(uid)]["lastbuild"] = time.time()
+            if str(uid) in S.d["users"]:
+                S.d["users"][str(uid)]["lastbuild"] = time.time()
     if pos > WORKERS:
         tg.send(chat, "🚦 Ты в очереди (впереди %d). Начну, как только освободится место." % (pos - WORKERS))
-    BUILD.submit(job_build, chat, uid, q, history or [], ev)
+    (BUILD_PREM if prem else BUILD).submit(job_build, chat, uid, q, history or [], ev, charge, "prem" if prem else "free")
 
 
-def job_build(chat, uid, q, history, cancel):
+def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
     t0 = time.time()
     mid = None
     refund = True
+    prem = is_prem(uid)
     try:
         mid = tg.send(chat, "🧠 Думаю над постройкой…")["message_id"]
         last = [0.0]
@@ -1400,19 +1426,26 @@ def job_build(chat, uid, q, history, cancel):
         with S.lock:
             S.d["stats"]["builds"] += 1
         model = user_model(uid)
-        spec, part = generate_spec(q, history, on_chunk, cancel, status, model)
-        r = run_spec(spec)
+        spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem)
+        r = run_spec(spec, prem)
         status("🎨 Рисую предпросмотр…")
-        png = render_preview(r)
+        png = render_preview_any(r)
         hist = [{"role": "user", "content": q}, {"role": "assistant", "content": json.dumps({"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, ensure_ascii=False)}]
-        bid = store_build(uid, q, spec, hist)
+        bid = store_build(uid, q, spec, hist, prem)
         cap = "✅ %s\n🧱 %d блоков · %d×%d×%d\n🤖 %s (сменить: /model)" % (spec.get("name") or "Постройка", r.n, *r.d, mname(model))
+        if max(r.d) > 128:
+            cap += "\n🔍 Превью уменьшено, в мире будет полный размер."
         if part:
             cap += "\n⚠ Ответ ИИ оборвался, показана собранная часть. Нажми «Заново» или попроси достроить: /edit …"
         if r.unk:
             cap += "\n⚠ Неизвестные блоки заменены камнем: " + ", ".join(r.unk[:6])
         cap += "\n\nНравится? Жми «Беру» — пришлю мир с постройкой у спавна.\nХочешь поменять — напиши /edit что изменить."
-        tg.photo(chat, png, cap, build_markup(bid))
+        if not prem:
+            if CITY_RE.search(q) or max(r.d[0], r.d[2]) >= 120:
+                cap += "\n\n💡 Для большой карты (город, РП) нужен Premium: до 384×384 и вид сверху → /premium"
+            else:
+                cap += "\n\n⭐ Premium: вид изнутри, карты 384×384, 15 в день → /premium"
+        send_previews(chat, r, cap, bid, prem, png)
         tg.safe_delete(chat, mid)
         refund = False
         with S.lock:
@@ -1445,11 +1478,12 @@ def job_build(chat, uid, q, history, cancel):
                 pass
         notify_admins_once("crash", "🐞 Ошибка в боте: %s: %s" % (type(e).__name__, str(e)[:200]), every=600)
     finally:
-        if refund and not is_admin(uid):
+        if refund and charge and not is_admin(uid):
             bump(uid, -1)
         ACTIVE.pop(uid, None)
-        with _plock:
-            PENDING[0] = max(0, PENDING[0] - 1)
+        if slot == "free":
+            with _plock:
+                PENDING[0] = max(0, PENDING[0] - 1)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1460,7 +1494,7 @@ HELP = ("👋 Я строю постройки для Minecraft Bedrock с по�
         "✏️ /edit <что поменять> — доработать последнюю постройку\n"
         "🤖 /model — выбрать ИИ (4 бесплатные модели)\n"
         "🛑 /cancel — остановить текущую\n"
-        "📊 /me — сколько построек осталось сегодня\n\n"
+        "📊 /me — лимит, статус и твой Premium\n⭐ /premium — Premium: огромные карты, вид изнутри и сверху, 15 в день\n🌍 /world — тема мира (Premium)\n\n"
         "Как это работает: ИИ строит → я присылаю фото-предпросмотр → если нравится, жмёшь «Беру» и получаешь .mcworld "
         "(мир для Minecraft Bedrock 1.21.50) с единственной этой постройкой у спавна.")
 
@@ -1511,13 +1545,17 @@ def on_callback_model(cq, data):
 
 
 def cmd_me(chat, uid):
-    lim = S.d["limit"]
+    lim = eff_limit(uid)
     if is_admin(uid) or not lim:
         t = "Для тебя без лимита."
     else:
         t = "Сегодня использовано %d из %d построек." % (used_today(uid), lim)
     m = {"on": "🟢 работает", "off": "⛔ выключен", "update": "🔧 на обновлении"}[S.d["mode"]]
-    tg.send(chat, "%s\nСервис: %s\nИИ: %s (сменить: /model)" % (t, m, mname(user_model(uid))))
+    if is_prem(uid):
+        pr = "👑 Premium: " + left_text(uid)
+    else:
+        pr = "⭐ Premium нет. Карты до 384×384, вид изнутри и сверху, %d построек в день → /premium" % S.d["prem_limit"]
+    tg.send(chat, "%s\n%s\nСервис: %s\nИИ: %s (сменить: /model)" % (t, pr, m, mname(user_model(uid))))
 
 
 def on_callback_user(cq, data):
@@ -1543,11 +1581,13 @@ def on_callback_user(cq, data):
             return tg.call("answerCallbackQuery", {"callback_query_id": cbid, "text": "Файл уже отправляется…"})
         lk[(uid, bid, act)] = time.time()
         tg.call("answerCallbackQuery", {"callback_query_id": cbid, "text": "Собираю файл…"})
-        r = run_spec(b["spec"])
+        r = run_spec_for_build(b)
         name = b["spec"].get("name") or "build"
+        if act == "st" and r.g.size > 4000000:
+            return tg.send(chat, "📦 Эта постройка слишком большая для .mcstructure (структурный блок держит ~64 блока). Жми «Беру» — мир откроется без проблем.")
         if act == "ok":
             title = ("BuildAI " + name)[:40]
-            data_b = build_mcworld_bytes(r, title)
+            data_b = build_mcworld_bytes(r, title, world_opts(uid))
             tg.doc(chat, data_b, safe_name(name) + ".mcworld",
                    "🌍 %s — мир для Minecraft Bedrock 1.21.50.\n\nОткрой файл в Minecraft (на телефоне: «Поделиться» → Minecraft). "
                    "Мир плоский, творческий; постройка стоит в 8 блоках на восток от места появления. "
@@ -1584,6 +1624,11 @@ ADMIN_HELP = (
     "/limit <число> — построек на человека в сутки (0 = без лимита)\n"
     "/ban <id|@ник> · /unban <id|@ник> · /banned\n"
     "/broadcast <текст> — рассылка всем\n\n"
+    "Premium:\n"
+    "/givesubscription <@ник|id> [срок] — выдать Premium (15m, 3h, 1d, 7d, 30d, 1y, forever; без срока = 30 дней)\n"
+    "/removesubscription <@ник|id> — снять · /premiumlist — у кого есть\n"
+    "/requests — заявки на проверке (приходят и сами, с кнопками «Выдать»)\n"
+    "/prices · /setprice <код> <звёзды> · /setpremlimit <число> — цены и лимит Premium\n\n"
     "Прочее:\n"
     "/stats — статистика · /status — состояние · /backup — копия состояния · /id — твой ID")
 
@@ -1800,6 +1845,676 @@ def on_callback_broadcast(cq, data):
 # ═════════════════════════════════════════════════════════════════════════════
 #  12. РАЗБОР ОБНОВЛЕНИЙ TELEGRAM
 # ═════════════════════════════════════════════════════════════════════════════
+# ===PREMIUM-BLOCK===
+# ═════════════════════════════════════════════════════════════════════════════
+#  11b. PREMIUM: подписка, оплата подарками ⭐ (вручную), виды сверху/изнутри, масштаб, тема мира
+# ═════════════════════════════════════════════════════════════════════════════
+FOREVER = 4102444800
+PLANS = [   # код, название, секунд, звёзд по умолчанию, значок
+    ("15m", "15 минут", 900, 15, "🧪"),
+    ("3h", "3 часа", 10800, 25, "⏳"),
+    ("10h", "10 часов", 36000, 50, "⌛"),
+    ("1d", "1 день", 86400, 75, "☀️"),
+    ("3d", "3 дня", 259200, 150, "🌤"),
+    ("7d", "7 дней", 604800, 300, "🔥"),
+    ("30d", "30 дней", 2592000, 750, "💎"),
+    ("1y", "1 год", 31536000, 5000, "👑"),
+    ("forever", "Навсегда", FOREVER, 12000, "🌟"),
+]
+PREM_CMDS = ("premium", "vip", "donate", "buy", "prem", "subscribe", "world")
+PREM_ADMIN_CMDS = ("givesubscription", "givesub", "givevip", "removesubscription", "delsub", "takesub",
+                   "premiumlist", "vips", "setpremlimit", "setprice", "prices", "requests", "payments")
+GROUNDS = [("grass_block", "🌱 Трава"), ("sand", "🏜 Песок"), ("snow", "❄️ Снег"), ("stone", "⛰ Камень")]
+TIMES = [(6000, "☀️ День"), (12000, "🌅 Закат"), (18000, "🌙 Ночь")]
+VIEW_SEM = threading.Semaphore(2)
+BUILD_PREM = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prem")
+_lock_ts = {}
+CITY_RE = re.compile(r"город|city|town|деревн|village|карт|\bmap\b|\bрп\b|\brp\b|остров|island|королевств|kingdom|страна|мегаполис", re.I)
+IMPROVE_Q = ("Улучши эту постройку: добавь больше деталей — интерьер с мебелью, освещение, декор, акценты другими блоками, "
+             "окружение (деревья, дорожки, забор). Сохрани общий вид и размер.")
+LOCKS = {"in": "🏠 Вид изнутри: разрезы со всех сторон и планы этажей", "td": "🗺 Вид сверху с сеткой чанков",
+         "zm": "🔎 Масштаб ×2/×3 без трат попыток", "up": "✨ Авто-улучшение в один клик", "wo": "🌍 Тема мира и время суток"}
+SYS_PROMPT_PREM = SYS_PROMPT.replace("any size up to 128 per axis", "any size up to 384 wide, 192 high and 384 deep") + (
+    " PREMIUM MAP MODE: this player may build HUGE scenes. For a city, town, village, island, castle with surroundings or any map: "
+    "first lay out the ground plan seen from above (road grid, plots, parks, water, walls), then build the houses with repeat ops, "
+    "vary heights and roofs, add street lights and trees. The player also sees a top-down map, so roads, rivers, plazas and plots "
+    "must read clearly from above. Keep the JSON compact (repeat/mirror/fill/hollow, at most about 600 ops). "
+    "For a single object (a house, a tree, a car) keep its natural size but make it richly detailed with a furnished interior.")
+
+
+def plan_by(code):
+    return next((p for p in PLANS if p[0] == code), None)
+
+
+def plan_stars(code):
+    p = plan_by(code)
+    try:
+        v = int((S.d.get("prices") or {}).get(code) or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else p[3]
+
+
+def is_prem(uid):
+    return is_admin(uid) or S.d["prem"].get(str(uid), 0) > time.time()
+
+
+def eff_limit(uid):
+    if is_admin(uid):
+        return 0
+    return S.d["prem_limit"] if is_prem(uid) else S.d["limit"]
+
+
+def fdate(ts):
+    if ts >= FOREVER - 86400:
+        return "навсегда"
+    return time.strftime("%d.%m.%Y %H:%M", time.gmtime(ts + UTC_OFFSET_H * 3600))
+
+
+def fdur(sec):
+    sec = int(max(0, sec))
+    d, r_ = divmod(sec, 86400)
+    h, r_ = divmod(r_, 3600)
+    m = r_ // 60
+    parts = []
+    if d:
+        parts.append("%d дн" % d)
+    if h:
+        parts.append("%d ч" % h)
+    if m and not d:
+        parts.append("%d мин" % m)
+    return " ".join(parts) or "меньше минуты"
+
+
+def left_text(uid):
+    exp = S.d["prem"].get(str(uid), 0)
+    if exp >= FOREVER - 86400 or (is_admin(uid) and not exp):
+        return "навсегда" + (" (админ)" if is_admin(uid) and not exp else "")
+    return "до %s (осталось %s)" % (fdate(exp), fdur(exp - time.time()))
+
+
+def grant(uid, sec):
+    with S.lock:
+        now = time.time()
+        cur = S.d["prem"].get(str(uid), 0)
+        new = FOREVER if (sec >= 10 ** 9 or cur >= FOREVER - 86400) else max(cur, now) + sec
+        S.d["prem"][str(uid)] = new
+    S.save()
+    return new
+
+
+def parse_dur(t):
+    t = (t or "").strip().lower().replace(" ", "")
+    if t in ("forever", "навсегда", "вечно", "inf", "lifetime", "∞"):
+        return 10 ** 10
+    p = plan_by(t)
+    if p:
+        return p[2] if p[2] < 10 ** 9 else 10 ** 10
+    m = re.fullmatch(r"(\d+)(mo|мес|min|мин|нед|год|m|м|h|ч|d|д|w|н|y|г)", t)
+    if not m:
+        return None
+    k = {"m": 60, "м": 60, "min": 60, "мин": 60, "h": 3600, "ч": 3600, "d": 86400, "д": 86400, "w": 604800, "н": 604800,
+         "нед": 604800, "mo": 2592000, "мес": 2592000, "y": 31536000, "г": 31536000, "год": 31536000}[m.group(2)]
+    n = int(m.group(1))
+    return n * k if 0 < n <= 100000 else None
+
+
+def plans_text():
+    out = []
+    for code, name, sec, _st, ic in PLANS:
+        st = plan_stars(code)
+        per = "  (≈ %d⭐/день)" % round(st / (sec / 86400.0)) if 86400 < sec < 10 ** 9 else ""
+        out.append("%s %s — %d⭐%s" % (ic, name, st, per))
+    return "\n".join(out)
+
+
+def premium_text(uid):
+    head = "👑 BuildAI Premium\n"
+    if is_prem(uid):
+        head += "✅ У тебя Premium: %s\n" % left_text(uid)
+    perks = (
+        "🗺 Огромные карты — до 384×192×384 блоков (в 9 раз больше площади, чем обычные 128×128): город для РП, деревня, "
+        "замок с округой. Плюс вид сверху с сеткой чанков\n"
+        "🏗 %d построек в день вместо %d\n"
+        "🏠 Вид изнутри — отдельная кнопка: разрезы со всех сторон и планы этажей\n"
+        "🔎 Масштаб ×2 / ×3 в один клик: маленький дом → особняк, попытки не тратятся\n"
+        "✨ Авто-улучшение одной кнопкой, правки /edit бесплатны\n"
+        "⚡ Без очереди и пауза 5 с вместо %d\n"
+        "🌍 Тема мира и время суток: снег, песок, ночь с огнями (/world)\n"
+        "👑 Значок Premium в /me") % (S.d["prem_limit"], S.d["limit"] or 5, COOLDOWN_SEC)
+    return "%s\n%s\n\n💳 Тарифы (оплата подарком в Telegram, цена в ⭐):\n%s\n\nВыбери срок кнопкой 👇" % (head, perks, plans_text())
+
+
+def premium_markup():
+    btns = [{"text": "%s %s · %d⭐" % (ic, name, plan_stars(code)), "callback_data": "pm:p:" + code} for code, name, _s, _st, ic in PLANS]
+    return {"inline_keyboard": [btns[i:i + 2] for i in range(0, len(btns), 2)]}
+
+
+def pay_text(code):
+    p = plan_by(code)
+    st = plan_stars(code)
+    return ("%s Premium на %s — %d⭐\n\nКак оплатить:\n1️⃣ Открой профиль @%s\n2️⃣ Нажми «Отправить подарок» и выбери подарок(и) "
+            "на сумму от %d⭐\n3️⃣ Вернись сюда и нажми «✅ Я отправил(а)»\n\n"
+            "Владелец проверит подарок и вручную выдаст Premium — обычно за несколько минут. Я напишу тебе сюда, как только он выдаст."
+            % (p[4], p[1], st, ADMIN_NAME, st))
+
+
+def pay_markup(code):
+    return {"inline_keyboard": [[{"text": "✅ Я отправил(а) подарок", "callback_data": "pm:s:" + code}],
+                                [{"text": "👤 Открыть @" + ADMIN_NAME, "url": "https://t.me/" + ADMIN_NAME}],
+                                [{"text": "⬅️ Все тарифы", "callback_data": "pm:menu"}]]}
+
+
+def uname_of(uid):
+    us = S.d["users"].get(str(uid), {})
+    return ("@" + us["u"]) if us.get("u") else (us.get("n") or "без ника")
+
+
+def admin_req_text(rid, x, tail=""):
+    p = plan_by(x["plan"])
+    return ("💳 Заявка на Premium #%s\n👤 %s · id %d\n📦 %s — %d⭐\n🕒 %s\n\nПроверь, пришёл ли подарок на @%s.%s"
+            % (rid, uname_of(x["uid"]), x["uid"], p[1], x["stars"], fdate(x["ts"]), ADMIN_NAME, tail))
+
+
+def admin_req_markup(rid):
+    return {"inline_keyboard": [[{"text": "✅ Выдать", "callback_data": "pay:ok:" + rid}, {"text": "❌ Отклонить", "callback_data": "pay:no:" + rid}]]}
+
+
+def make_request(uid, code):
+    p = plan_by(code)
+    if not p:
+        return False, "Тариф не найден."
+    now = time.time()
+    with S.lock:
+        pay = S.d["pay"]
+        for rid, x in pay.items():
+            if x["uid"] == uid and x["st"] == "wait" and now - x["ts"] < 6 * 3600:
+                return False, "⏳ Твоя заявка #%s уже ждёт проверки. Владелец @%s скоро её посмотрит." % (rid, ADMIN_NAME)
+        if now - max([x["ts"] for x in pay.values() if x["uid"] == uid] or [0]) < 45:
+            return False, "Подожди минутку перед новой заявкой."
+        rid = secrets.token_hex(3)
+        pay[rid] = {"uid": uid, "plan": code, "stars": plan_stars(code), "ts": now, "st": "wait"}
+        for old in sorted(pay, key=lambda k: pay[k]["ts"])[:max(0, len(pay) - 80)]:
+            pay.pop(old, None)
+        x = dict(pay[rid])
+    S.save()
+    for a in ADMIN_IDS:
+        try:
+            tg.send(a, admin_req_text(rid, x), admin_req_markup(rid))
+        except Exception:
+            pass
+    return True, ("📨 Заявка #%s отправлена владельцу!\nТариф: %s — %d⭐\n\nКак только он увидит подарок, Premium включится "
+                  "автоматически и я напишу тебе здесь. Если долго тишина — напиши @%s." % (rid, p[1], x["stars"], ADMIN_NAME))
+
+
+def notify_grant(uid, label=""):
+    try:
+        tg.send(uid, "🎉 Тебе выдан Premium%s!\nДействует: %s\n\nПопробуй сразу: /build город для РП с дорогами, парком и рекой — "
+                     "и жми «Вид сверху» и «Вид изнутри».\nНастройки мира: /world · все возможности: /premium"
+                % ((" (" + label + ")") if label else "", left_text(uid)))
+    except Exception:
+        pass
+
+
+def _apply_prem_wait(uid, uname):
+    w = S.d.get("prem_wait") or {}
+    sec = w.pop((uname or "").lower(), None) if uname else None
+    if sec:
+        grant(int(uid), sec)
+        FAST.submit(notify_grant, int(uid))
+
+
+def prem_watch():
+    while True:
+        time.sleep(60)
+        try:
+            now, gone = time.time(), []
+            with S.lock:
+                for u, exp in list(S.d["prem"].items()):
+                    if exp <= now:
+                        gone.append(u)
+                        S.d["prem"].pop(u, None)
+            if gone:
+                S.save()
+                for u in gone:
+                    try:
+                        tg.send(int(u), "⌛ Твой Premium закончился.\nВсе твои миры и постройки остались у тебя. "
+                                        "Продлить: /premium", premium_markup())
+                    except Exception:
+                        pass
+        except Exception:
+            log.error("prem_watch: %s", traceback.format_exc())
+
+
+# ─── Настройки мира ──────────────────────────────────────────────────────────
+def _wo(uid):
+    o = (S.d["users"].get(str(uid)) or {}).get("wo") or {}
+    return {"g": o.get("g") if o.get("g") in dict(GROUNDS) else "grass_block", "t": o.get("t") if o.get("t") in dict(TIMES) else 6000}
+
+
+def world_opts(uid):
+    return _wo(uid) if is_prem(uid) else None
+
+
+def world_text(uid):
+    o = _wo(uid)
+    return "🌍 Настройки мира (Premium)\nЗемля и время суток для всех твоих следующих миров.\n\nСейчас: %s · %s" % (dict(GROUNDS)[o["g"]], dict(TIMES)[o["t"]])
+
+
+def world_markup(uid):
+    o = _wo(uid)
+    g = [{"text": ("✅ " if k == o["g"] else "") + t, "callback_data": "wo:g:" + k} for k, t in GROUNDS]
+    tm = [{"text": ("✅ " if v == o["t"] else "") + t, "callback_data": "wo:t:%d" % v} for v, t in TIMES]
+    return {"inline_keyboard": [g[:2], g[2:], tm]}
+
+
+# ─── Картинки: вид сверху, разрезы, планы этажей ─────────────────────────────
+def _png(img):
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def render_topdown(r, maxpx=1100, grid=True):
+    g, pal = r.g, r.pal
+    X, Y, Z = g.shape
+    nz = g != 0
+    has = nz.any(axis=1)
+    topy = (Y - 1) - np.argmax(nz[:, ::-1, :], axis=1)
+    vals = np.take_along_axis(g, topy[:, None, :], axis=1)[:, 0, :]
+    lut = np.zeros((len(pal), 3), dtype=np.float32)
+    for i, nm in enumerate(pal):
+        if i:
+            c = D[nm]
+            lut[i] = c[1] if c[1] else c[0]
+    ground = np.array([104, 160, 76], dtype=np.float32)
+    img = np.where(has[..., None], lut[vals], ground)
+    h = np.where(has, topy + 1, 0).astype(np.float32)
+    dx, dz = np.zeros_like(h), np.zeros_like(h)
+    dx[1:, :] = h[1:, :] - h[:-1, :]
+    dz[:, 1:] = h[:, 1:] - h[:, :-1]
+    shade = 1.0 + np.clip((dx + dz) * 0.06, -0.3, 0.3)
+    base = 0.82 + 0.18 * (h / max(1.0, float(h.max())))
+    img = np.clip(img * (shade * base)[..., None], 0, 255).astype(np.uint8)
+    arr = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
+    s = max(1, min(24, maxpx // max(X, Z)))
+    im = Image.fromarray(arr, "RGB").resize((X * s, Z * s), Image.NEAREST).convert("RGBA")
+    d = ImageDraw.Draw(im, "RGBA")
+    gridon = grid and max(X, Z) >= 48
+    if gridon:
+        for x in range(8, X + 1, 16):
+            d.line([(x * s, 0), (x * s, Z * s)], fill=(255, 255, 255, 55), width=1)
+        for z in range((Z // 2) % 16, Z + 1, 16):
+            d.line([(0, z * s), (X * s, z * s)], fill=(255, 255, 255, 55), width=1)
+    try:
+        from PIL import ImageFont
+        try:
+            f = ImageFont.load_default(size=18)
+        except TypeError:
+            f = ImageFont.load_default()
+    except Exception:
+        f = None
+    W, H = im.size
+    canvas = Image.new("RGB", (max(W, 420), H + 30), (30, 34, 32))
+    canvas.paste(im.convert("RGB"), (0, 30))
+    ImageDraw.Draw(canvas).text((8, 5), "N up | top view %dx%d%s" % (X, Z, " | grid = 16-block chunks" if gridon else ""), fill=(235, 240, 235), font=f)
+    return _png(canvas)
+
+
+def _downsample(g, f):
+    # каждая ячейка f×f×f -> один блок (если заполнена хотя бы на 1/5), чтобы тонкие стены не пропадали
+    X, Y, Z = g.shape
+    px, py, pz = (-X) % f, (-Y) % f, (-Z) % f
+    if px or py or pz:
+        g = np.pad(g, ((0, px), (0, py), (0, pz)))
+    nx, ny, nz = g.shape[0] // f, g.shape[1] // f, g.shape[2] // f
+    c = g.reshape(nx, f, ny, f, nz, f).transpose(0, 2, 4, 1, 3, 5).reshape(nx, ny, nz, f ** 3)
+    cnt = (c != 0).sum(axis=3)
+    return np.ascontiguousarray(np.where(cnt >= max(1, f ** 3 // 5), c.max(axis=3), 0).astype(g.dtype))
+
+
+def render_preview_any(r):
+    m = max(r.d)
+    if m <= 128:
+        return render_preview(r)
+    g = _downsample(r.g, -(-m // 128))
+    rr = SimpleNamespace(ops=r.ops, pal=r.pal, g=g, d=tuple(int(v) for v in g.shape), n=int(np.count_nonzero(g)), unk=r.unk, bad=r.bad)
+    return render_preview(rr)
+
+
+def _floor_cuts(g):
+    X, Y, Z = g.shape
+    cnt = (g != 0).sum(axis=(0, 2)).astype(np.float64)
+    cuts = []
+    if cnt.max() > 0:
+        slab = cnt >= 0.5 * cnt.max()
+        y = 0
+        while y < Y:
+            if slab[y]:
+                y2 = y
+                while y2 + 1 < Y and slab[y2 + 1]:
+                    y2 += 1
+                cut = min(Y - 1, y2 + 4)
+                if y2 < Y * 0.8 and cut >= 2 and (not cuts or cut - cuts[-1] >= 4):
+                    cuts.append(cut)
+                y = y2 + 1
+            else:
+                y += 1
+    return cuts[:2] or [max(2, int(Y * 0.45))]
+
+
+def render_interior(r, W=900, H=720):
+    g, pal = r.g, r.pal
+    note = ""
+    X, Y, Z = g.shape
+    grid = True
+    if max(X, Z) > 140:
+        x0, z0 = max(0, X // 2 - 70), max(0, Z // 2 - 70)
+        g = np.ascontiguousarray(g[x0:x0 + 140, :, z0:z0 + 140])
+        note = " · центральный участок 140×140"
+        grid = False
+    out = []
+    ss = 2 if np.count_nonzero(g) < 120000 else 1
+    for k in range(4):
+        try:
+            a = np.ascontiguousarray(np.rot90(g, k, axes=(0, 2)))
+            a[a.shape[0] // 2:, :, a.shape[2] // 2:] = 0
+            out.append((_png(_iso_view(a, pal, 0, W * ss, H * ss, ss)), "🏠 Разрез %d/4 — вид изнутри с нового ракурса%s" % (k + 1, note)))
+        except Exception:
+            log.warning("interior view %d: %s", k, traceback.format_exc())
+    for n, cut in enumerate(_floor_cuts(g), 1):
+        try:
+            sub = SimpleNamespace(g=np.ascontiguousarray(g[:, :cut + 1, :]), pal=pal)
+            out.append((render_topdown(sub, 900, grid), "📐 План этажа %d — крыша снята (срез на высоте %d)%s" % (n, cut, note)))
+        except Exception:
+            log.warning("plan view %d: %s", n, traceback.format_exc())
+    return out
+
+
+def send_album(chat, items):
+    try:
+        media, files = [], {}
+        for i, (png, cap) in enumerate(items[:10]):
+            files["f%d" % i] = ("v%d.png" % i, png, "image/png")
+            media.append({"type": "photo", "media": "attach://f%d" % i, "caption": cap[:200]})
+        tg.call("sendMediaGroup", {"chat_id": chat, "media": media}, files=files, timeout=180)
+    except Exception as e:
+        log.warning("album: %s", e)
+        for png, cap in items[:10]:
+            tg.photo(chat, png, cap)
+
+
+def zoom_result(r, k):
+    g = np.ascontiguousarray(np.repeat(np.repeat(np.repeat(r.g, k, 0), k, 1), k, 2))
+    return SimpleNamespace(ops=r.ops, pal=r.pal, g=g, d=tuple(int(v) for v in g.shape), n=int(np.count_nonzero(g)), unk=r.unk, bad=r.bad)
+
+
+def run_spec_for_build(b):
+    r = run_spec(b["spec"], bool(b.get("prem")))
+    z = int(b.get("zoom") or 1)
+    return zoom_result(r, z) if z > 1 else r
+
+
+def send_previews(chat, r, cap, bid, prem, png=None):
+    if prem and max(r.d[0], r.d[2]) >= 48:
+        try:
+            tg.photo(chat, render_topdown(r), "🗺 Вид сверху · %d×%d блоков" % (r.d[0], r.d[2]))
+        except Exception as e:
+            log.warning("topdown: %s", e)
+    tg.photo(chat, png or render_preview_any(r), cap, build_markup(bid, prem))
+
+
+def job_view(chat, uid, bid, kind, k=1):
+    b = S.d["builds"].get(bid)
+    if not b:
+        return
+    mid = None
+    try:
+        with VIEW_SEM:
+            if kind == "in":
+                mid = tg.send(chat, "🏠 Рисую разрезы и планы этажей… (до минуты)")["message_id"]
+            r = run_spec_for_build(b)
+            X, Y, Z = r.d
+            if kind == "td":
+                tg.photo(chat, render_topdown(r), "🗺 Вид сверху · %d×%d блоков" % (X, Z))
+            elif kind == "in":
+                items = render_interior(r)
+                if not items:
+                    raise ValueError("нечего показать")
+                send_album(chat, items)
+            else:
+                if X * k > PREM_CAP[0] or Y * k > PREM_CAP[1] or Z * k > PREM_CAP[2]:
+                    tg.send(chat, "🔎 ×%d не поместится: получилось бы %d×%d×%d, а максимум %d×%d×%d. Попробуй меньший масштаб." % (k, X * k, Y * k, Z * k, *PREM_CAP))
+                    return
+                r2 = zoom_result(r, k)
+                nb = store_build(uid, b["q"], b["spec"], b["h"], True, int(b.get("zoom") or 1) * k)
+                send_previews(chat, r2, "🔎 Масштаб ×%d\n🧱 %d блоков · %d×%d×%d\n\nЖми «Беру» — пришлю мир." % (k, r2.n, *r2.d), nb, True)
+    except Exception:
+        log.error("job_view: %s", traceback.format_exc())
+        try:
+            tg.send(chat, "⚠️ Не получилось нарисовать, попробуй ещё раз.")
+        except Exception:
+            pass
+    finally:
+        if mid:
+            tg.safe_delete(chat, mid)
+
+
+# ─── Команды игрока ──────────────────────────────────────────────────────────
+def premium_user_cmd(cid, uid, cmd, arg, msg):
+    if msg["chat"]["type"] != "private":
+        return tg.send(cid, "👑 Premium и настройки мира — в личке с ботом. Напиши мне туда: /premium")
+    if cmd == "world":
+        if not is_prem(uid):
+            return tg.send(cid, "🌍 Тема мира (снег, песок, ночь с огнями) — часть Premium.\n\n" + premium_text(uid), premium_markup())
+        return tg.send(cid, world_text(uid), world_markup(uid))
+    return tg.send(cid, premium_text(uid), premium_markup())
+
+
+def _ans(cq, text=None, alert=False):
+    try:
+        tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": text, "show_alert": True if alert else None}, tries=1)
+    except Exception:
+        pass
+
+
+def premium_callback(cq, data):
+    key = data.split(":", 1)[0]
+    if key not in ("pm", "pay", "pl", "in", "td", "zm", "up", "wo"):
+        return False
+    uid, chat, mid = cq["from"]["id"], cq["message"]["chat"]["id"], cq["message"]["message_id"]
+    parts = data.split(":")
+
+    def lock(what):
+        _ans(cq, "🔒 %s\nЭто часть Premium — открой /premium" % LOCKS.get(what, "Premium"), True)
+        if time.time() - _lock_ts.get(uid, 0) > 90:
+            _lock_ts[uid] = time.time()
+            tg.send(chat, premium_text(uid), premium_markup())
+
+    if key == "pm":
+        act = parts[1] if len(parts) > 1 else "menu"
+        code = parts[2] if len(parts) > 2 else ""
+        if act == "menu":
+            _ans(cq)
+            tg.safe_edit(chat, mid, premium_text(uid), premium_markup())
+        elif act == "p" and plan_by(code):
+            _ans(cq)
+            tg.safe_edit(chat, mid, pay_text(code), pay_markup(code))
+        elif act == "s" and plan_by(code):
+            ok, text = make_request(uid, code)
+            if ok:
+                _ans(cq, "Заявка отправлена ✅")
+                tg.safe_edit(chat, mid, text, {"inline_keyboard": [[{"text": "⬅️ К тарифам", "callback_data": "pm:menu"}]]})
+            else:
+                _ans(cq, text, True)
+        else:
+            _ans(cq)
+        return True
+    if key == "pl":
+        what = parts[1] if len(parts) > 1 else "pm"
+        if what == "pm":
+            _ans(cq)
+            tg.send(chat, premium_text(uid), premium_markup())
+        else:
+            lock(what)
+        return True
+    if key == "pay":
+        if not is_admin(uid):
+            _ans(cq, "Только для админа.", True)
+            return True
+        act, rid = (parts + ["", ""])[1], (parts + ["", ""])[2]
+        with S.lock:
+            x = S.d["pay"].get(rid)
+            st = x["st"] if x else None
+            if x and st == "wait":
+                x["st"] = "ok" if act == "ok" else "no"
+        if not x:
+            _ans(cq, "Заявка не найдена.", True)
+        elif st != "wait":
+            _ans(cq, "Уже обработана: %s" % ("выдано" if st == "ok" else "отклонена"), True)
+        else:
+            S.save()
+            p = plan_by(x["plan"])
+            if act == "ok":
+                grant(x["uid"], p[2])
+                _ans(cq, "Выдано ✅")
+                tg.safe_edit(chat, mid, admin_req_text(rid, x, "\n\n✅ ВЫДАНО"))
+                notify_grant(x["uid"], p[1])
+            else:
+                _ans(cq, "Отклонено")
+                tg.safe_edit(chat, mid, admin_req_text(rid, x, "\n\n❌ ОТКЛОНЕНО"))
+                try:
+                    tg.send(x["uid"], "❌ Заявка #%s отклонена: подарок не найден. Если это ошибка — напиши @%s." % (rid, ADMIN_NAME))
+                except Exception:
+                    pass
+        return True
+    if key == "wo":
+        if not is_prem(uid):
+            lock("wo")
+            return True
+        kind, val = (parts + ["", ""])[1], (parts + ["", ""])[2]
+        with S.lock:
+            us = S.d["users"].get(str(uid))
+            if us is not None:
+                wo = us.setdefault("wo", {})
+                if kind == "g" and val in dict(GROUNDS):
+                    wo["g"] = val
+                elif kind == "t" and val.isdigit() and int(val) in dict(TIMES):
+                    wo["t"] = int(val)
+        S.save()
+        _ans(cq, "Сохранено")
+        tg.safe_edit(chat, mid, world_text(uid), world_markup(uid))
+        return True
+    # in / td / zm / up — действия над постройкой
+    if not is_prem(uid):
+        lock(key)
+        return True
+    bid = parts[1] if len(parts) > 1 else ""
+    b = S.d["builds"].get(bid)
+    if not b:
+        _ans(cq, "Эта постройка уже недоступна. Сделай новую: /build", True)
+        return True
+    if b["uid"] != uid and not is_admin(uid):
+        _ans(cq, "Это чужая постройка.", True)
+        return True
+    if key == "up":
+        _ans(cq, "Улучшаю…")
+        try_start_build(chat, uid, IMPROVE_Q, b["h"])
+        return True
+    k = int(parts[2]) if key == "zm" and len(parts) > 2 and parts[2] in ("2", "3") else 1
+    kk = (uid, bid, key, k)
+    if time.time() - ACTIVE_FILES.get(kk, 0) < 10:
+        _ans(cq, "Уже делаю…")
+        return True
+    ACTIVE_FILES[kk] = time.time()
+    _ans(cq, {"in": "Рисую разрезы…", "td": "Рисую вид сверху…", "zm": "Увеличиваю ×%d…" % k}.get(key, "…"))
+    FAST.submit(job_view, chat, uid, bid, key, k)
+    return True
+
+
+# ─── Админ: выдача и управление ─────────────────────────────────────────────
+def premium_admin_cmd(chat, uid, cmd, arg, msg):
+    if cmd not in PREM_ADMIN_CMDS:
+        return False
+    A = arg.strip()
+    if cmd in ("givesubscription", "givesub", "givevip"):
+        parts = A.split()
+        if not parts:
+            tg.send(chat, "Использование: /givesubscription @ник [срок]\nСрок: 15m, 3h, 1d, 7d, 30d, 1y, forever (или 2w, 6mo). Без срока — 30 дней.\n"
+                          "Если у человека уже есть Premium — срок прибавится. Работает и по ID: /givesubscription 123456789 7d")
+            return True
+        dur = parse_dur("".join(parts[1:])) if len(parts) > 1 else 2592000
+        if dur is None:
+            tg.send(chat, "Не понял срок «%s». Примеры: 15m, 3h, 1d, 7d, 30d, 1y, forever." % " ".join(parts[1:]))
+            return True
+        who = parts[0]
+        t = find_user(who)
+        label = "навсегда" if dur >= 10 ** 9 else fdur(dur)
+        if t is None:
+            uname = who.lstrip("@").lower()
+            if not re.fullmatch(r"[a-z0-9_]{4,32}", uname):
+                tg.send(chat, "Не похоже на ник. Пример: /givesubscription @username 30d")
+                return True
+            with S.lock:
+                w = S.d.setdefault("prem_wait", {})
+                w[uname] = (10 ** 10 if dur >= 10 ** 9 else min(10 ** 9, w.get(uname, 0) + dur))
+            S.save()
+            tg.send(chat, "📝 @%s ещё не писал боту, поэтому не знаю его ID. Premium (%s) выдам автоматически, как только он напишет боту (/start)." % (uname, label))
+            return True
+        exp = grant(t, dur)
+        sent = True
+        try:
+            tg.send(t, "🎉 Тебе выдан Premium (%s)!\nДействует: %s\n\nПопробуй: /build город для РП — и жми «Вид сверху» и «Вид изнутри».\nНастройки мира: /world · все возможности: /premium" % (label, left_text(t)))
+        except Exception:
+            sent = False
+        tg.send(chat, "👑 Premium выдан: %s (id %d) на %s.\nДействует: %s%s" % (uname_of(t), t, label, fdate(exp), "" if sent else "\n⚠️ Написать ему не смог (он не запускал бота или заблокировал его)."))
+        return True
+    if cmd in ("removesubscription", "delsub", "takesub"):
+        t = find_user(A.split()[0]) if A.split() else None
+        if t is None:
+            tg.send(chat, "Использование: /removesubscription @ник")
+            return True
+        with S.lock:
+            had = S.d["prem"].pop(str(t), None)
+        S.save()
+        tg.send(chat, ("🗑 Premium снят у %s (id %d)." if had else "У %s (id %d) и не было Premium.") % (uname_of(t), t))
+        return True
+    if cmd in ("premiumlist", "vips"):
+        now = time.time()
+        rows = sorted(((e, u) for u, e in S.d["prem"].items() if e > now))
+        if not rows:
+            tg.send(chat, "Сейчас Premium ни у кого нет. Выдать: /givesubscription @ник 30d")
+            return True
+        tg.send(chat, "👑 Premium сейчас (%d):\n" % len(rows) + "\n".join("%s (id %s) — %s" % (uname_of(u), u, left_text(int(u))) for e, u in rows[:60]))
+        return True
+    if cmd == "setpremlimit":
+        if not A.isdigit():
+            tg.send(chat, "Сейчас у Premium: %d построек в сутки. Изменить: /setpremlimit <число>" % S.d["prem_limit"])
+            return True
+        S.d["prem_limit"] = int(A)
+        S.save()
+        tg.send(chat, "✅ Лимит Premium: %d построек в сутки." % S.d["prem_limit"])
+        return True
+    if cmd in ("setprice", "prices"):
+        w = A.split()
+        if len(w) == 2 and plan_by(w[0]) and w[1].isdigit() and int(w[1]) > 0:
+            S.d["prices"][w[0]] = int(w[1])
+            S.save()
+            tg.send(chat, "✅ Цена «%s» теперь %s⭐" % (plan_by(w[0])[1], w[1]))
+            return True
+        tg.send(chat, "Цены (⭐):\n" + "\n".join("%s — %s: %d" % (c, n, plan_stars(c)) for c, n, _s, _st, _i in PLANS) + "\n\nИзменить: /setprice <код> <звёзды>, например /setprice 1d 100")
+        return True
+    if cmd in ("requests", "payments"):
+        wait = [(rid, x) for rid, x in S.d["pay"].items() if x["st"] == "wait"]
+        if not wait:
+            tg.send(chat, "Заявок на проверке нет.")
+            return True
+        for rid, x in sorted(wait, key=lambda t: t[1]["ts"]):
+            tg.send(chat, admin_req_text(rid, x), admin_req_markup(rid))
+        return True
+    return False
+
+
 def on_message(msg):
     u, chat = msg.get("from"), msg["chat"]
     if not u or u.get("is_bot"):
@@ -1833,6 +2548,8 @@ def on_message(msg):
         return cmd_me(cid, uid)
     if cmd in ("model", "models", "ai"):
         return cmd_model(cid, uid)
+    if cmd in PREM_CMDS:
+        return premium_user_cmd(cid, uid, cmd, arg, msg)
     if cmd == "cancel":
         ev = ACTIVE.get(uid)
         if ev:
@@ -1841,10 +2558,11 @@ def on_message(msg):
         return tg.send(cid, "Сейчас ничего не строится.")
     if is_admin(uid):
         if chat["type"] != "private":
-            if cmd in ("admin", "adm", "panel", "off", "on", "update", "addkey", "keys", "delkey", "testkeys", "setmodel", "limit", "ban", "unban", "banned", "broadcast", "backup", "stats", "status"):
+            if cmd in ("admin", "adm", "panel", "off", "on", "update", "addkey", "keys", "delkey", "testkeys", "setmodel", "limit", "ban", "unban", "banned", "broadcast", "backup", "stats", "status") + PREM_ADMIN_CMDS:
                 return tg.send(cid, "🔒 Админ-команды работают только в личке с ботом.")
             return
-        admin_command(cid, uid, cmd, arg, msg)
+        if not premium_admin_cmd(cid, uid, cmd, arg, msg):
+            admin_command(cid, uid, cmd, arg, msg)
 
 
 def on_callback(cq):
@@ -1859,6 +2577,8 @@ def on_callback(cq):
         return on_callback_broadcast(cq, data)
     if cq["from"]["id"] in S.d["banned"] and not is_admin(cq["from"]["id"]):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
+    if premium_callback(cq, data):
+        return
     if data.startswith("md:"):
         return on_callback_model(cq, data)
     on_callback_user(cq, data)
@@ -1973,6 +2693,7 @@ def main():
     for k in TH_KEYS_ENV:
         add_key(k, "из TH_KEYS")
     threading.Thread(target=backup_loop, daemon=True).start()
+    threading.Thread(target=prem_watch, daemon=True).start()
     if WEBHOOK_BASE:
         run_webhook()
     else:
