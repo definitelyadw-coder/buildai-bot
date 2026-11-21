@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.4-settings"
+BOT_VERSION = "2.5-chars"
 PREM_LIMIT_DEFAULT = int(_env("PREMIUM_LIMIT", "15"))     # построек в сутки у Premium
 PREM_COOLDOWN = int(_env("PREMIUM_COOLDOWN", "5"))        # пауза между построками у Premium, сек
 PREM_CAP = (384, 192, 384)                                # максимальный размер постройки у Premium (X, Y, Z)
@@ -450,8 +450,8 @@ def fmt_int(n):
     return "{:,}".format(int(n)).replace(",", " ")
 
 
-def progress_text(blocks, elapsed, note=""):
-    t = "🧱 Строю… Это может занять от 5-10 минут…\n\n[Построено %s блоков]\n⏱ Прошло %d:%02d" % (fmt_int(blocks), elapsed // 60, elapsed % 60)
+def progress_text(blocks, elapsed, note="", chars=0):
+    t = "🧱 Строю… Это может занять от 5-10 минут…\n\n[Построено %s блоков\nНаписано %s символов]\n⏱ Прошло %d:%02d" % (fmt_int(blocks), fmt_int(chars), elapsed // 60, elapsed % 60)
     if note:
         t += "\n" + note
     return t + "\n\n🛑 Остановить: /cancel"
@@ -1522,14 +1522,15 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
     stop_pulse = threading.Event()
     pth = None
     try:
-        prog = {"blocks": 0, "ops": 0, "parts": None, "note": ""}
+        prog = {"blocks": 0, "ops": 0, "chars": 0, "parts": None, "note": ""}
         mid = tg.send(chat, progress_text(0, 0))["message_id"]
 
         def status(t):
             prog["note"] = t
-            tg.safe_edit(chat, mid, progress_text(prog["blocks"], int(time.time() - t0), t))
+            tg.safe_edit(chat, mid, progress_text(prog["blocks"], int(time.time() - t0), t, prog["chars"]))
 
         def on_chunk(n, parts=None):
+            prog["chars"] = max(prog["chars"], n)
             if parts is not None:
                 prog["parts"] = parts
 
@@ -1546,7 +1547,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
                             prog["blocks"] = max(prog["blocks"], rr.n)
                 except Exception:
                     pass
-                txt = progress_text(prog["blocks"], int(time.time() - t0), prog["note"])
+                txt = progress_text(prog["blocks"], int(time.time() - t0), prog["note"], prog["chars"])
                 if txt != shown:
                     shown = txt
                     tg.safe_edit(chat, mid, txt)
