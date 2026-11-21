@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.2-premium"
+BOT_VERSION = "2.3-fastbuild"
 PREM_LIMIT_DEFAULT = int(_env("PREMIUM_LIMIT", "15"))     # построек в сутки у Premium
 PREM_COOLDOWN = int(_env("PREMIUM_COOLDOWN", "5"))        # пауза между построками у Premium, сек
 PREM_CAP = (384, 192, 384)                                # максимальный размер постройки у Premium (X, Y, Z)
@@ -57,7 +57,7 @@ DAILY_LIMIT    = int(_env("DAILY_LIMIT", "5"))        # построек на ч
 COOLDOWN_SEC   = int(_env("COOLDOWN_SEC", "20"))      # пауза между запросами одного человека
 WORKERS        = int(_env("WORKERS", "2"))            # сколько построек одновременно
 MAX_QUEUE      = int(_env("MAX_QUEUE", "8"))          # сколько ждёт в очереди максимум
-GEN_TIMEOUT    = int(_env("GEN_TIMEOUT", "300"))      # потолок ожидания ответа ИИ, сек
+GEN_TIMEOUT    = max(600, int(_env("GEN_TIMEOUT", "720")))      # потолок ожидания ответа ИИ, сек
 MAX_TOKENS     = int(_env("MAX_TOKENS", "0"))         # 0 = не передавать
 PORT           = int(_env("PORT", "7860"))
 WEBHOOK_BASE   = _env("WEBHOOK_URL") or _env("RENDER_EXTERNAL_URL") or (("https://" + _env("SPACE_HOST")) if _env("SPACE_HOST") else "")
@@ -164,7 +164,7 @@ Ops:
 - "sphere": {"t":"sphere","b":"glass","a":[cx,cy,cz],"r":6,"hollow":true,"half":"top"}. Ball or dome; r may be [rx,ry,rz] for an ellipsoid; half "top" or "bottom" cuts at the centre height (top = dome).
 - "mirror": {"t":"mirror","axis":"x","at":10}. Copies everything built so far across the plane axis=at. Use it for symmetric builds: make one half, then mirror.
 - "repeat": {"t":"repeat","n":4,"d":[6,0,0],"ops":[...]}. Repeats the nested ops n times, each copy shifted by d (rows of columns, windows, battlements).
-First decide what the object is and what makes its silhouette recognizable (a hat = wide flat round brim + narrower taller round crown + a band of another colour; a tree = trunk + round crown; a tower = round or square shaft + roof), and build exactly what was asked, never a generic tower on a platform. If the user attached a photo, reproduce the object from it. Use ONLY these blocks: @@BLOCKS@@. Make it detailed: foundation, pillars, roof (stepped layers or a dome), windows, lights, interior. Prefer fill/hollow/cylinder/sphere over many set ops. Output only the plan and the JSON block, nothing after it. When asked to edit, output the full updated JSON.""".replace("@@BLOCKS@@", ", ".join(D.keys()))
+First decide what the object is and what makes its silhouette recognizable (a hat = wide flat round brim + narrower taller round crown + a band of another colour; a tree = trunk + round crown; a tower = round or square shaft + roof), and build exactly what was asked, never a generic tower on a platform. If the user attached a photo, reproduce the object from it. Use ONLY these blocks: @@BLOCKS@@. Make it detailed: foundation, pillars, roof (stepped layers or a dome), windows, lights, interior. Prefer fill/hollow/cylinder/sphere over many set ops. Keep the Russian plan short (3-5 lines, no long reasoning). Keep the JSON compact: use repeat, mirror, fill, hollow, cylinder and sphere instead of many set ops, normally at most about 300 ops. Output only the plan and the JSON block, nothing after it. When asked to edit, output the full updated JSON.""".replace("@@BLOCKS@@", ", ".join(D.keys()))
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  3. ДВИЖОК ПОСТРОЕК: cylinder/sphere/line/mirror/repeat -> fill/hollow/set -> сетка блоков
@@ -397,6 +397,64 @@ def salvage_spec(t):
         return None
     nm = re.search(r'"name"\s*:\s*"([^"]*)"', b)
     return {"name": nm.group(1) if nm else "build", "ops": ops}
+
+
+# ===FASTBUILD-BLOCK===
+def partial_ops(t):
+    """Достаёт все ПОЛНЫЕ операции из недописанного JSON (в том числе repeat с вложенными ops)."""
+    k = t.rfind("```json")
+    b = t[k + 7:] if k >= 0 else t
+    a = b.find('"ops"')
+    if a < 0:
+        return None
+    i = b.find("[", a)
+    if i < 0:
+        return None
+    ops, depth, start, instr, esc = [], 0, -1, False, False
+    for j in range(i + 1, len(b)):
+        ch = b[j]
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+            continue
+        if ch == '"':
+            instr = True
+        elif ch == "{":
+            if depth == 0:
+                start = j
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        o = json.loads(b[start:j + 1])
+                        if isinstance(o, dict) and o.get("t"):
+                            ops.append(o)
+                    except Exception:
+                        pass
+                    start = -1
+        elif ch == "]" and depth == 0:
+            break
+    if not ops:
+        return None
+    nm = re.search(r'"name"\s*:\s*"([^"]*)"', b)
+    return {"name": nm.group(1) if nm else "build", "ops": ops}
+
+
+def fmt_int(n):
+    return "{:,}".format(int(n)).replace(",", " ")
+
+
+def progress_text(blocks, elapsed, note=""):
+    t = "🧱 Строю… Это может занять от 5-10 минут…\n\n[Построено %s блоков]\n⏱ Прошло %d:%02d" % (fmt_int(blocks), elapsed // 60, elapsed % 60)
+    if note:
+        t += "\n" + note
+    return t + "\n\n🛑 Остановить: /cancel"
 
 
 # ─── .mcstructure (как в BuildAI_v9.html) ───────────────────────────────────
@@ -1107,6 +1165,12 @@ class LLMError(Exception):
         self.kind = kind
 
 
+class LLMTimeout(LLMError):
+    def __init__(self, msg, partial=""):
+        super().__init__(msg, "timeout")
+        self.partial = partial
+
+
 class Cancelled(Exception):
     pass
 
@@ -1149,12 +1213,13 @@ def _llm_headers(key):
     return {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
 
-def llm_stream(key, messages, model, on_chunk, cancel):
+def llm_stream(key, messages, model, on_chunk, cancel, deadline=None):
     body = {"model": model, "messages": messages, "stream": True}
     if MAX_TOKENS:
         body["max_tokens"] = MAX_TOKENS
     t0 = time.time()
-    r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 90))
+    limit = deadline or (t0 + GEN_TIMEOUT)
+    r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 180))
     try:
         if r.status_code != 200:
             raise HTTPFail(r.status_code, r.text[:300])
@@ -1165,8 +1230,8 @@ def llm_stream(key, messages, model, on_chunk, cancel):
         for raw in r.iter_lines(chunk_size=1024):
             if cancel.is_set():
                 raise Cancelled()
-            if time.time() - t0 > GEN_TIMEOUT:
-                raise LLMError("ИИ отвечает слишком долго, попробуй ещё раз", "timeout")
+            if time.time() > limit:
+                raise LLMTimeout("ИИ не успел ответить за %d мин. Попробуй запрос попроще или другую модель: /model" % (GEN_TIMEOUT // 60), "".join(full))
             if not raw:
                 continue
             line = raw.decode("utf-8", "replace")
@@ -1183,7 +1248,7 @@ def llm_stream(key, messages, model, on_chunk, cancel):
             if c:
                 full.append(c)
                 n += len(c)
-                on_chunk(n)
+                on_chunk(n, full)
         return "".join(full)
     finally:
         r.close()
@@ -1201,7 +1266,7 @@ def user_model(uid):
     return m if m in MODEL_NAME else S.d["model"]
 
 
-def llm_complete(messages, on_chunk, cancel, model=None):
+def llm_complete(messages, on_chunk, cancel, model=None, deadline=None):
     model = model if model in MODEL_NAME else S.d["model"]
     if MODEL_COOL.get(model, 0) > time.time():
         raise LLMError("модель «%s» сейчас недоступна. Выбери другую: /model" % mname(model), "model")
@@ -1212,7 +1277,7 @@ def llm_complete(messages, on_chunk, cancel, model=None):
             raise LLMError(last or "нет рабочих API-ключей TokenHarbor", "nokeys")
         tried.add(k["k"])
         try:
-            txt = llm_stream(k["k"], messages, model, on_chunk, cancel)
+            txt = llm_stream(k["k"], messages, model, on_chunk, cancel, deadline)
             key_mark(k, ok=k["ok"] + 1)
             return txt
         except (Cancelled, LLMError):
@@ -1255,16 +1320,32 @@ def test_key(key, model=None):
 def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False):
     base = [{"role": "system", "content": SYS_PROMPT_PREM if prem else SYS_PROMPT}] + list(history or [])
     err, best = None, None
+    deadline = time.time() + GEN_TIMEOUT          # общий потолок на все попытки вместе
     for i in range(3):
         if i:
+            if deadline - time.time() < 90:       # на ещё одну попытку времени не осталось
+                break
             status("🔁 Ответ оборвался, пробую ещё раз (%d/2)…" % i)
         user = q if not i else q + "\n\n(Прошлый ответ оборвался. Теперь без длинного плана: одна строка плана и сразу один компактный ```json блок. Используй fill/hollow, не больше 120 операций.)"
-        text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel, model)
+        try:
+            text = llm_complete(base + [{"role": "user", "content": user}], on_chunk, cancel, model, deadline)
+        except LLMTimeout as e:
+            text = e.partial or ""
+            try:
+                return parse_spec(text), False
+            except ValueError:
+                pass
+            sp = partial_ops(text) or salvage_spec(text)
+            if sp and (not best or len(sp["ops"]) > len(best["ops"])):
+                best = sp
+            if not best:
+                raise
+            break
         try:
             return parse_spec(text), False
         except ValueError as e:
             err = e
-            sp = salvage_spec(text)
+            sp = partial_ops(text) or salvage_spec(text)
             if sp and (not best or len(sp["ops"]) > len(best["ops"])):
                 best = sp
     if best:
@@ -1411,24 +1492,50 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
     mid = None
     refund = True
     prem = is_prem(uid)
+    stop_pulse = threading.Event()
+    pth = None
     try:
-        mid = tg.send(chat, "🧠 Думаю над постройкой…")["message_id"]
-        last = [0.0]
+        prog = {"blocks": 0, "ops": 0, "parts": None, "note": ""}
+        mid = tg.send(chat, progress_text(0, 0))["message_id"]
 
         def status(t):
-            tg.safe_edit(chat, mid, t)
+            prog["note"] = t
+            tg.safe_edit(chat, mid, progress_text(prog["blocks"], int(time.time() - t0), t))
 
-        def on_chunk(n):
-            if time.time() - last[0] >= 7:
-                last[0] = time.time()
-                status("🧱 Строю… ИИ написал %d симв. (прошло %d с)" % (n, time.time() - t0))
+        def on_chunk(n, parts=None):
+            if parts is not None:
+                prog["parts"] = parts
+
+        def pulse():
+            shown = ""
+            while not stop_pulse.wait(5):
+                try:
+                    parts = prog["parts"]
+                    if parts is not None:
+                        sp = partial_ops("".join(parts))
+                        if sp and len(sp["ops"]) != prog["ops"]:
+                            prog["ops"] = len(sp["ops"])
+                            rr = run_spec(sp, prem)
+                            prog["blocks"] = max(prog["blocks"], rr.n)
+                except Exception:
+                    pass
+                txt = progress_text(prog["blocks"], int(time.time() - t0), prog["note"])
+                if txt != shown:
+                    shown = txt
+                    tg.safe_edit(chat, mid, txt)
 
         with S.lock:
             S.d["stats"]["builds"] += 1
         model = user_model(uid)
-        spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem)
+        pth = threading.Thread(target=pulse, daemon=True, name="pulse")
+        pth.start()
+        try:
+            spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem)
+        finally:
+            stop_pulse.set()
+            pth.join(timeout=20)
         r = run_spec(spec, prem)
-        status("🎨 Рисую предпросмотр…")
+        tg.safe_edit(chat, mid, "🎨 Построено %s блоков. Рисую предпросмотр…" % fmt_int(r.n))
         png = render_preview_any(r)
         hist = [{"role": "user", "content": q}, {"role": "assistant", "content": json.dumps({"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, ensure_ascii=False)}]
         bid = store_build(uid, q, spec, hist, prem)
@@ -1478,6 +1585,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
                 pass
         notify_admins_once("crash", "🐞 Ошибка в боте: %s: %s" % (type(e).__name__, str(e)[:200]), every=600)
     finally:
+        stop_pulse.set()
         if refund and charge and not is_admin(uid):
             bump(uid, -1)
         ACTIVE.pop(uid, None)
