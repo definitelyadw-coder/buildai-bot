@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.6-referral"
+BOT_VERSION = "2.7-counters"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -456,6 +456,8 @@ def fmt_int(n):
 
 def progress_text(blocks, elapsed, note="", chars=0):
     t = "🧱 Строю… Это может занять от 5-10 минут…\n\n[Построено %s блоков\nНаписано %s символов]\n⏱ Прошло %d:%02d" % (fmt_int(blocks), fmt_int(chars), elapsed // 60, elapsed % 60)
+    if not blocks:
+        t += "\n" + ("🧠 ИИ обдумывает постройку, блоки появятся, когда он начнёт писать код…" if chars else "⏳ Жду ответ ИИ…")
     if note:
         t += "\n" + note
     return t + "\n\n🛑 Остановить: /cancel"
@@ -1236,8 +1238,11 @@ def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=Fa
             raise HTTPFail(r.status_code, r.text[:300])
         if "event-stream" not in r.headers.get("content-type", "").lower():
             j = r.json()
-            return (j.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-        full, n = [], 0
+            txt0 = (j.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            if txt0:
+                on_chunk(len(txt0), [txt0])
+            return txt0
+        full, n, rn = [], 0, 0      # n — символы ответа, rn — символы рассуждения модели
         for raw in r.iter_lines(chunk_size=1024):
             if cancel.is_set():
                 raise Cancelled()
@@ -1256,10 +1261,16 @@ def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=Fa
             except Exception:
                 continue
             c = delta.get("content")
+            if isinstance(delta, dict):
+                for k_, v_ in delta.items():
+                    if k_ not in ("content", "role") and isinstance(v_, str) and v_:
+                        rn += len(v_)
+                        if not c:
+                            on_chunk(n + rn, full)
             if c:
                 full.append(c)
                 n += len(c)
-                on_chunk(n, full)
+                on_chunk(n + rn, full)
         return "".join(full)
     finally:
         r.close()
