@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.8-nothink"
+BOT_VERSION = "2.9-furniture"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -154,14 +154,86 @@ def _hex(h):
     return (n >> 16 & 255, n >> 8 & 255, n & 255)
 
 
-D = {}   # имя -> (цвет бока, цвет верха или None, флаг)
-for _ln in BL.strip().split("\n"):
+# ─── мебель и «рабочие» блоки: сундуки, бочки, верстаки, печи, кровати… ───────────────────────────────
+BL_EXTRA = """chest a47a30 - p
+trapped_chest a0602a - p
+ender_chest 233b3d - n
+barrel 8a6a3a b8945f p
+crafting_table 8a5a2b b8945f p
+furnace 6e6e6e - c
+blast_furnace 5f5f66 - c
+smoker 6a5f55 - c
+bookshelf 8a6a3a b8945f p
+jukebox 6b4a30 3e2a22 p
+noteblock 7a5230 - p
+tnt c8453a d8d0c0 s
+cartography_table 5a4a38 - p
+fletching_table c8b27a - p
+smithing_table 3a3a40 - s
+loom a07a45 - p
+composter 6f5a2e - p
+lectern b8945f - p
+enchanting_table 3b1f4a a02030 s
+anvil 2a2a2d - s
+stonecutter_block 8b8b8b - s
+pumpkin d9801e - n
+lit_pumpkin f0a030 - e
+melon_block 6f9a2b - n
+bed 7b5a33 a12722 w"""
+DIRS4 = ("north", "south", "east", "west")
+FACE4 = ("chest", "trapped_chest", "ender_chest", "furnace", "blast_furnace", "smoker", "lectern")   # b:"chest:north" = лицом на север
+BAR_DIR = {"down": 0, "up": 1, "north": 2, "south": 3, "west": 4, "east": 5}                        # facing_direction бочки
+BED_DIR = {"south": 0, "west": 1, "north": 2, "east": 3}                                           # direction кровати = куда смотрит изголовье
+BED_VEC = {"south": (0, 1), "north": (0, -1), "east": (1, 0), "west": (-1, 0)}                      # (dx, dz) от ног к изголовью
+
+
+class BlockTable(dict):
+    """Таблица блоков. Имена с направлением («chest:north», «bed:south:head») ищутся по базовому блоку,
+    но в keys() (а значит и в подсказке для ИИ) попадают только базовые имена."""
+    def _variant_ok(self, k):
+        p = k.split(":")
+        b = p[0]
+        if not dict.__contains__(self, b):
+            return False
+        if len(p) == 2:
+            return (b in FACE4 and p[1] in DIRS4) or (b == "barrel" and p[1] in BAR_DIR)
+        return len(p) == 3 and b == "bed" and p[1] in BED_DIR and p[2] in ("foot", "head")
+
+    def __contains__(self, k):
+        return dict.__contains__(self, k) or (isinstance(k, str) and self._variant_ok(k))
+
+    def __missing__(self, k):
+        if isinstance(k, str) and self._variant_ok(k):
+            return dict.__getitem__(self, k.split(":")[0])
+        raise KeyError(k)
+
+
+def block_states(name):
+    """Имя из палитры -> (id блока без minecraft:, [(тип NBT, ключ, значение)]): 1 байт, 3 int, 8 строка."""
+    p = name.split(":")
+    b = p[0]
+    if b.endswith("_leaves"):
+        return b, [(1, "persistent_bit", 1), (1, "update_bit", 0)]
+    if len(p) == 2 and b in FACE4 and p[1] in DIRS4:
+        st = [(8, "minecraft:cardinal_direction", p[1])]
+        if b == "lectern":
+            st.append((1, "powered_bit", 0))
+        return b, st
+    if len(p) == 2 and b == "barrel" and p[1] in BAR_DIR:
+        return b, [(3, "facing_direction", BAR_DIR[p[1]]), (1, "open_bit", 0)]
+    if len(p) == 3 and b == "bed" and p[1] in BED_DIR and p[2] in ("foot", "head"):
+        return b, [(3, "direction", BED_DIR[p[1]]), (1, "head_piece_bit", 1 if p[2] == "head" else 0), (1, "occupied_bit", 0)]
+    return b, []
+
+
+D = BlockTable()   # имя -> (цвет бока, цвет верха или None, флаг)
+for _ln in (BL.strip() + "\n" + BL_EXTRA).split("\n"):
     _n, _s, _u, _f = _ln.split()
     D[_n] = (_hex(_s), None if _u == "-" else _hex(_u), _f)
 
 SYS_PROMPT = """You are a master builder for Minecraft Bedrock 1.21.50. First think the build through in your head: write a plan in Russian, no markdown (size, materials, roof, windows, lights, details). Then output the final build in ONE ```json block:
 {"name":"castle","ops":[{"t":"fill","b":"stone_bricks","a":[0,0,0],"c":[20,0,20]},{"t":"hollow","b":"oak_planks","a":[2,1,2],"c":[18,6,18]},{"t":"set","b":"glass","a":[5,3,2]}]}
-Rules: x=east, y=up, z=south; integers; start near 0; any size up to 128 per axis. Ops apply in order, later ones overwrite; use b:"air" to carve doors and windows. No stairs, slabs or doors: only full blocks.
+Rules: x=east, y=up, z=south; integers; start near 0; any size up to 128 per axis. Ops apply in order, later ones overwrite; use b:"air" to carve doors and windows. No stairs, slabs or doors: only full blocks, plus the furniture blocks below. FURNITURE: chest, trapped_chest, ender_chest, barrel, crafting_table, furnace, blast_furnace, smoker, bookshelf, jukebox, noteblock, tnt, cartography_table, fletching_table, smithing_table, loom, composter, lectern, enchanting_table, anvil, stonecutter_block, pumpkin, lit_pumpkin, melon_block. Place each with one "set" (or a row with fill/line), inside rooms, front facing the room. chest, trapped_chest, ender_chest, furnace, blast_furnace, smoker and lectern take a facing suffix: b:"chest:north" (north/south/east/west = the side the FRONT looks at; north=-z, south=+z, east=+x, west=-x); barrel also accepts up/down (b:"barrel:up"). Facing is not flipped by mirror: place facing blocks after the mirror. BED: one op {"t":"bed","a":[x,y,z],"f":"south"}: foot at a, head one block further in direction f (2 long, 1 wide); lay it on the floor with the head against a wall; colour is always red.
 Ops:
 - "fill": solid box a..c. "hollow": box walls only (interior becomes air). "set": one block at a. "line": straight 3D line of blocks from a to c.
 - "cylinder": {"t":"cylinder","b":"stone_bricks","a":[cx,y,cz],"r":5,"h":8,"hollow":false}. Vertical round column; a = centre of the bottom layer, r = radius, h = height; hollow = walls only, open top and bottom.
@@ -237,6 +309,15 @@ def expand(lst, off=None, depth=0, budget=None, cap=30000):
                 bad += 1
                 continue
             push(t, b, a, a if t == "set" else c)
+        elif t == "bed":
+            f = str(o.get("f") or o.get("facing") or "south").lower()
+            if not okp(a) or f not in BED_VEC:
+                bad += 1
+                continue
+            v = BED_VEC[f]
+            push("set", "bed:%s:foot" % f, a, a)
+            h = [a[0] + v[0], a[1], a[2] + v[1]]
+            push("set", "bed:%s:head" % f, h, h)
         elif t == "line":
             if not okp(a) or not okp(c):
                 bad += 1
@@ -329,6 +410,8 @@ def run_spec(spec, prem=False):
         if t not in ("fill", "hollow", "set"):
             bad += 1
             continue
+        if b != "air" and b not in D and ":" in b and b.split(":")[0] in D:      # «chest:up» и т.п.: берём блок без направления
+            b = b.split(":")[0]
         if b != "air" and b not in D:
             unk.add(b)
             b = "stone"
@@ -496,11 +579,17 @@ def mcstructure_bytes(r):
     hd(9, "entities"); w8(10); w32(0)
     hd(10, "palette"); hd(10, "default"); hd(9, "block_palette"); w8(10); w32(len(r.pal))
     for n in r.pal:
-        hd(8, "name"); ws("minecraft:" + n)
+        bn, sts = block_states(n)
+        hd(8, "name"); ws("minecraft:" + bn)
         hd(10, "states")
-        if n.endswith("_leaves"):
-            hd(1, "persistent_bit"); w8(1)
-            hd(1, "update_bit"); w8(0)
+        for ty_, k_, v_ in sts:
+            hd(ty_, k_)
+            if ty_ == 3:
+                w32(v_)
+            elif ty_ == 8:
+                ws(v_)
+            else:
+                w8(v_)
         w8(0)
         hd(3, "version"); w32(BLOCK_VERSION)
         w8(0)
@@ -761,10 +850,9 @@ def n_ints(n, vals): return b"\x09" + _ns(n) + b"\x03" + struct.pack("<i", len(v
 
 
 def _block_nbt(name):
-    states = []
-    if name.endswith("_leaves"):
-        states = [n_byte("persistent_bit", 1), n_byte("update_bit", 0)]
-    return n_comp("", [n_str("name", "minecraft:" + name), n_comp("states", states), n_int("version", BLOCK_VERSION)])
+    bn, sts = block_states(name)
+    states = [n_int(k_, v_) if ty_ == 3 else n_str(k_, v_) if ty_ == 8 else n_byte(k_, v_) for ty_, k_, v_ in sts]
+    return n_comp("", [n_str("name", "minecraft:" + bn), n_comp("states", states), n_int("version", BLOCK_VERSION)])
 
 
 # ─── Подчанки ────────────────────────────────────────────────────────────────
