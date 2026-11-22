@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.7-counters"
+BOT_VERSION = "2.8-nothink"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -1219,26 +1219,46 @@ def _llm_headers(key):
     return {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
 
-def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=False):
+class ReasoningSeen(Exception):
+    """Модель начала «думать», хотя мы просили этого не делать (внутренний сигнал)."""
+
+
+# Способы выключить размышления у разных шлюзов и моделей разные:
+#   thinking {type: disabled}  — родной у DeepSeek V4 и MiMo,  reasoning {enabled: false} — стиль OpenRouter,
+#   reasoning_effort "none"    — стиль OpenAI/DeepInfra,       chat_template_kwargs {enable_thinking: false} — vLLM.
+# Бот пробует их по очереди (сначала все сразу) и запоминает тот, после которого ответ пошёл БЕЗ потока рассуждений.
+NT_ALL = {"thinking": {"type": "disabled"}, "reasoning": {"enabled": False}, "reasoning_effort": "none",
+          "chat_template_kwargs": {"enable_thinking": False}}
+NT_VARIANTS = [("all", NT_ALL),
+               ("thinking", {"thinking": NT_ALL["thinking"]}),
+               ("reasoning", {"reasoning": NT_ALL["reasoning"]}),
+               ("effort", {"reasoning_effort": "none"}),
+               ("template", {"chat_template_kwargs": NT_ALL["chat_template_kwargs"]})]
+NT = {}                         # модель -> {"ok": имя сработавшего способа, "dead": не сработавшие, "off_until": пауза}
+
+
+def _nt_info(model):
+    return NT.setdefault(model, {"ok": None, "dead": set(), "off_until": 0})
+
+
+def _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, extra, abort_on_reasoning):
     body = {"model": model, "messages": messages, "stream": True}
-    if nothink and not NOTHINK_BAD[0]:
-        body["reasoning"] = {"enabled": False}      # просим шлюз не включать режим рассуждений модели
+    if extra:
+        body.update(extra)
     if MAX_TOKENS:
         body["max_tokens"] = MAX_TOKENS
     t0 = time.time()
     limit = deadline or (t0 + GEN_TIMEOUT)
     r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 180))
-    if r.status_code in (400, 422) and "reasoning" in body:      # шлюз не знает такой параметр: запоминаем и повторяем без него
-        NOTHINK_BAD[0] = True
-        r.close()
-        body.pop("reasoning", None)
-        r = requests.post(TH_URL, headers=_llm_headers(key), json=body, stream=True, timeout=(15, 180))
     try:
         if r.status_code != 200:
             raise HTTPFail(r.status_code, r.text[:300])
         if "event-stream" not in r.headers.get("content-type", "").lower():
             j = r.json()
-            txt0 = (j.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+            msg0 = (j.get("choices") or [{}])[0].get("message", {}) or {}
+            txt0 = msg0.get("content") or ""
+            if abort_on_reasoning and not txt0 and any(isinstance(v_, str) and v_ for k_, v_ in msg0.items() if k_ not in ("content", "role")):
+                raise ReasoningSeen()
             if txt0:
                 on_chunk(len(txt0), [txt0])
             return txt0
@@ -1264,6 +1284,8 @@ def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=Fa
             if isinstance(delta, dict):
                 for k_, v_ in delta.items():
                     if k_ not in ("content", "role") and isinstance(v_, str) and v_:
+                        if abort_on_reasoning and not full:
+                            raise ReasoningSeen()      # просили без размышлений, а они идут: бросаем и пробуем другой способ
                         rn += len(v_)
                         if not c:
                             on_chunk(n + rn, full)
@@ -1274,6 +1296,37 @@ def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=Fa
         return "".join(full)
     finally:
         r.close()
+
+
+def llm_stream(key, messages, model, on_chunk, cancel, deadline=None, nothink=False):
+    if not nothink:
+        return _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, None, False)
+    st = _nt_info(model)
+    if st["off_until"] > time.time():          # недавно выяснили, что у этой модели размышления не выключить
+        return _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, None, False)
+    ex = dict(NT_VARIANTS)
+    names = ([st["ok"]] if st["ok"] else []) + [nm for nm, _ in NT_VARIANTS if nm != st["ok"] and nm not in st["dead"]]
+    for nm in names:
+        try:
+            txt = _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, ex[nm], True)
+            if st["ok"] != nm:
+                log.info("размышления выключены для %s способом «%s»", model, nm)
+            st["ok"] = nm
+            return txt
+        except ReasoningSeen:
+            log.info("для %s способ «%s» не выключил размышления", model, nm)
+        except HTTPFail as e:
+            if e.code not in (400, 422):
+                raise
+            log.info("для %s способ «%s» отклонён шлюзом (HTTP %s)", model, nm, e.code)
+        st["dead"].add(nm)
+        if st["ok"] == nm:
+            st["ok"] = None
+    # ни один способ не сработал: на 30 минут перестаём пробовать (ответ идёт с размышлениями), потом попробуем заново
+    st["off_until"], st["dead"], st["ok"] = time.time() + 1800, set(), None
+    notify_admins_once("nothink" + model, "⚠️ Не удалось выключить размышления у модели %s: TokenHarbor игнорирует или отклоняет все известные параметры. "
+                                           "Игроки с выключенными размышлениями получают ответ дольше обычного. Через 30 минут я попробую снова." % model)
+    return _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, None, False)
 
 
 MODEL_COOL = {}               # модель -> до какого времени считаем её недоступной (в памяти)
