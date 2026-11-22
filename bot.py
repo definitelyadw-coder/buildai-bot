@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "2.9-furniture"
+BOT_VERSION = "3.0-furnviz"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -223,6 +223,13 @@ def block_states(name):
         return b, [(3, "facing_direction", BAR_DIR[p[1]]), (1, "open_bit", 0)]
     if len(p) == 3 and b == "bed" and p[1] in BED_DIR and p[2] in ("foot", "head"):
         return b, [(3, "direction", BED_DIR[p[1]]), (1, "head_piece_bit", 1 if p[2] == "head" else 0), (1, "occupied_bit", 0)]
+    if len(p) == 1 and b in FACE4:                                   # без направления: лицом на юг (так же рисует превью)
+        st = [(8, "minecraft:cardinal_direction", "south")]
+        if b == "lectern":
+            st.append((1, "powered_bit", 0))
+        return b, st
+    if len(p) == 1 and b == "barrel":                                # без направления: открытой стороной вверх
+        return b, [(3, "facing_direction", 1), (1, "open_bit", 0)]
     return b, []
 
 
@@ -593,7 +600,9 @@ def mcstructure_bytes(r):
         w8(0)
         hd(3, "version"); w32(BLOCK_VERSION)
         w8(0)
-    hd(10, "block_position_data"); w8(0); w8(0); w8(0); w8(0)
+    hd(10, "block_position_data")
+    o.extend(_struct_bpd(r))
+    w8(0); w8(0); w8(0); w8(0)
     hd(9, "structure_world_origin"); w8(3); w32(3); w32(0); w32(0); w32(0)
     w8(0)
     return bytes(o)
@@ -601,18 +610,568 @@ def mcstructure_bytes(r):
 # ═════════════════════════════════════════════════════════════════════════════
 #  4. ФОТО-ПРЕДПРОСМОТР: изометрия на Pillow, два ракурса (с противоположных сторон)
 # ═════════════════════════════════════════════════════════════════════════════
+# ===FURNVIZ-BLOCK===
 def _shade(c, f):
     return (max(0, min(255, int(c[0] * f))), max(0, min(255, int(c[1] * f))), max(0, min(255, int(c[2] * f))))
 
 
-def _iso_view(g, pal, k, W, H, ss):
+# ─── ТЕКСТУРЫ МЕБЕЛИ (3.0-furnviz): 16×16 пиксель-арт, нарисован кодом, без скачивания из интернета ───────────────
+def _im(c, w=16, h=16):
+    return Image.new("RGBA", (w, h), tuple(c) + (255,))
+
+
+def _noise(im, seed, amt=8):
+    a = np.array(im, dtype=np.int16)
+    n = np.random.RandomState(seed).randint(-amt, amt + 1, size=a.shape[:2])
+    a[..., :3] += n[..., None]
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGBA")
+
+
+def _t_planks(base, dark, light):
+    im = _im(base)
+    d = ImageDraw.Draw(im)
+    for y in (3, 7, 11, 15):
+        d.line([(0, y), (15, y)], fill=dark)
+    for y in (0, 4, 8, 12):
+        d.line([(0, y), (15, y)], fill=light)
+    for x, y in ((5, 1), (12, 5), (3, 9), (10, 13)):
+        d.line([(x, y), (x, y + 2)], fill=dark)
+    return im
+
+
+def _t_chest(part, base, edge, hi, latch, latch_edge):
+    im = _im(base)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 15], outline=edge)
+    if part == "top":
+        d.rectangle([1, 1, 14, 14], outline=hi)
+        return _noise(im, 3, 5)
+    d.line([(1, 1), (14, 1)], fill=hi)
+    d.line([(1, 5), (14, 5)], fill=edge)
+    d.line([(1, 6), (14, 6)], fill=hi)
+    if part == "front":
+        d.rectangle([6, 3, 9, 7], fill=latch_edge)
+        d.rectangle([7, 4, 8, 6], fill=latch)
+    return _noise(im, 5, 5)
+
+
+def _t_barrel(part):
+    if part == "open":
+        im = _im((152, 112, 62))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(96, 66, 34))
+        d.rectangle([2, 2, 13, 13], fill=(60, 42, 26), outline=(104, 74, 40))
+        d.rectangle([4, 4, 11, 11], fill=(44, 30, 20))
+        return _noise(im, 7, 5)
+    im = _im((146, 106, 58))
+    d = ImageDraw.Draw(im)
+    for x in (3, 7, 11):
+        d.line([(x, 0), (x, 15)], fill=(104, 72, 38))
+    for y in (2, 3, 12, 13):
+        d.line([(0, y), (15, y)], fill=(86, 84, 82) if y in (2, 13) else (60, 58, 58))
+    d.line([(0, 0), (15, 0)], fill=(104, 72, 38))
+    d.line([(0, 15), (15, 15)], fill=(104, 72, 38))
+    return _noise(im, 8, 5)
+
+
+def _t_crafting(part):
+    if part == "top":
+        im = _im((178, 142, 88))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(112, 78, 40))
+        for v in (5, 10):
+            d.line([(2, v), (13, v)], fill=(98, 66, 34))
+            d.line([(v, 2), (v, 13)], fill=(98, 66, 34))
+        return _noise(im, 9, 5)
+    im = _t_planks((166, 128, 76), (120, 88, 48), (184, 148, 92))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 2], fill=(104, 72, 38))
+    d.rectangle([3, 5, 5, 12], fill=(150, 150, 156))
+    d.rectangle([4, 4, 4, 5], fill=(90, 60, 30))
+    d.rectangle([9, 6, 13, 7], fill=(150, 150, 156))
+    d.rectangle([10, 8, 11, 12], fill=(100, 68, 34))
+    return im
+
+
+def _stone(base, amt=12, seed=11):
+    return _noise(_im(base), seed, amt)
+
+
+def _t_furnace(part, kind):
+    if kind == "furnace":
+        base, edge, dark = (128, 128, 130), (92, 92, 96), (34, 34, 38)
+    elif kind == "blast":
+        base, edge, dark = (92, 94, 104), (62, 62, 72), (26, 26, 32)
+    else:
+        base, edge, dark = (122, 98, 72), (84, 64, 44), (30, 24, 22)
+    im = _stone(base, 12 if kind == "furnace" else 7, 12)
+    d = ImageDraw.Draw(im)
+    if part == "top":
+        d.rectangle([0, 0, 15, 15], outline=edge)
+        if kind == "smoker":
+            d.rectangle([5, 5, 10, 10], fill=(48, 38, 32), outline=edge)
+        elif kind == "blast":
+            d.rectangle([3, 3, 12, 12], outline=edge)
+            d.rectangle([5, 5, 10, 10], fill=(44, 44, 50))
+        return im
+    d.rectangle([0, 0, 15, 15], outline=edge)
+    if part == "front":
+        if kind == "furnace":
+            d.rectangle([4, 2, 11, 3], fill=dark)
+            d.rectangle([3, 6, 12, 13], fill=dark)
+            d.line([(4, 7), (11, 7)], fill=(70, 70, 76))
+        elif kind == "blast":
+            d.rectangle([2, 2, 13, 4], fill=(70, 70, 78))
+            d.rectangle([3, 6, 12, 13], fill=dark)
+            for x in (5, 7, 9, 11):
+                d.line([(x, 7), (x, 12)], fill=(86, 86, 94))
+            for x, y in ((2, 2), (13, 2), (2, 4), (13, 4)):
+                d.point((x, y), fill=(130, 130, 140))
+        else:
+            d.rectangle([2, 2, 13, 4], fill=(150, 112, 70))
+            d.rectangle([3, 6, 12, 13], fill=dark)
+            d.line([(4, 7), (11, 7)], fill=(150, 112, 70))
+    return im
+
+
+def _t_bookshelf(part):
+    pl = _t_planks((164, 126, 74), (118, 86, 46), (182, 146, 90))
+    if part == "top":
+        return pl
+    im = pl.copy()
+    d = ImageDraw.Draw(im)
+    cols = [(150, 44, 44), (52, 92, 152), (72, 132, 62), (186, 154, 52), (112, 62, 132), (64, 64, 68), (170, 96, 40)]
+    for row, (y0, y1) in enumerate(((3, 7), (9, 13))):
+        d.rectangle([1, y0, 14, y1], fill=(46, 30, 18))
+        x, i = 1, row * 3
+        while x <= 14:
+            wd = 2 if (x + i) % 3 else 3
+            c = cols[i % len(cols)]
+            d.rectangle([x, y0 + (i % 2), min(14, x + wd - 1), y1], fill=c)
+            d.line([(x, y0 + (i % 2)), (x, y1)], fill=_shade(c, 1.25))
+            x += wd + 0
+            i += 1
+    d.line([(0, 8), (15, 8)], fill=(118, 86, 46))
+    return im
+
+
+def _t_jukebox(part):
+    im = _noise(_im((122, 78, 54)), 13, 6)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 15], outline=(78, 48, 32))
+    if part == "top":
+        d.ellipse([3, 3, 12, 12], fill=(40, 28, 24), outline=(170, 128, 96))
+        d.rectangle([7, 7, 8, 8], fill=(90, 70, 60))
+    else:
+        d.rectangle([5, 3, 10, 8], fill=(30, 20, 16), outline=(170, 128, 96))
+        d.line([(1, 11), (14, 11)], fill=(78, 48, 32))
+    return im
+
+
+def _t_noteblock(part):
+    im = _noise(_im((118, 72, 48)), 14, 6)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 15], outline=(76, 44, 28))
+    if part == "side":
+        c = (218, 178, 136)
+        d.line([(9, 4), (9, 10)], fill=c)
+        d.rectangle([6, 9, 8, 11], fill=c)
+        d.line([(10, 4), (12, 5)], fill=c)
+    return im
+
+
+def _t_tnt(part):
+    if part == "top":
+        im = _noise(_im((196, 186, 174)), 15, 5)
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(150, 40, 34))
+        d.rectangle([7, 7, 8, 8], fill=(50, 40, 34))
+        return im
+    im = _noise(_im((206, 52, 40)), 16, 5)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 4, 15, 11], fill=(226, 218, 206))
+    k = (30, 24, 22)
+    d.line([(2, 5), (4, 5)], fill=k); d.line([(3, 6), (3, 9)], fill=k)
+    d.line([(6, 5), (6, 9)], fill=k); d.line([(8, 5), (8, 9)], fill=k); d.line([(7, 6), (7, 7)], fill=k)
+    d.line([(10, 5), (12, 5)], fill=k); d.line([(11, 6), (11, 9)], fill=k)
+    return im
+
+
+def _t_cartography(part):
+    if part == "top":
+        im = _im((210, 184, 132))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(104, 72, 40))
+        for v in (5, 10):
+            d.line([(1, v), (14, v)], fill=(168, 138, 90))
+            d.line([(v, 1), (v, 14)], fill=(168, 138, 90))
+        d.rectangle([9, 8, 10, 9], fill=(190, 50, 44))
+        return _noise(im, 17, 4)
+    im = _t_planks((128, 92, 56), (92, 64, 36), (146, 108, 68))
+    d = ImageDraw.Draw(im)
+    d.rectangle([2, 5, 8, 11], fill=(214, 192, 142), outline=(150, 120, 80))
+    d.line([(3, 7), (7, 7)], fill=(150, 120, 80))
+    return im
+
+
+def _t_fletching(part):
+    if part == "top":
+        im = _t_planks((200, 170, 112), (158, 128, 80), (216, 188, 130))
+        d = ImageDraw.Draw(im)
+        d.line([(2, 13), (13, 2)], fill=(104, 72, 40))
+        d.line([(2, 11), (4, 13)], fill=(236, 236, 236))
+        d.line([(12, 3), (13, 4)], fill=(150, 150, 156))
+        return im
+    im = _t_planks((196, 166, 108), (152, 122, 76), (214, 186, 128))
+    d = ImageDraw.Draw(im)
+    for x, c in ((3, (200, 56, 48)), (7, (236, 236, 236)), (11, (56, 100, 190))):
+        d.rectangle([x, 4, x + 1, 10], fill=c)
+    return im
+
+
+def _t_smithing(part):
+    if part == "top":
+        im = _noise(_im((64, 64, 72)), 18, 5)
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(36, 36, 42))
+        d.rectangle([3, 6, 12, 8], fill=(150, 150, 160))
+        d.rectangle([5, 9, 9, 10], fill=(150, 150, 160))
+        return im
+    im = _t_planks((150, 110, 66), (108, 76, 42), (168, 128, 82))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 4], fill=(58, 58, 66))
+    d.line([(0, 5), (15, 5)], fill=(36, 36, 42))
+    return im
+
+
+def _t_loom(part):
+    if part == "top":
+        im = _im((232, 232, 232))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(150, 112, 66))
+        for x in (3, 4, 11, 12):
+            d.line([(x, 1), (x, 14)], fill=(196, 52, 52))
+        d.line([(7, 1), (8, 14)], fill=(200, 200, 204))
+        return im
+    im = _t_planks((150, 112, 66), (108, 76, 42), (168, 130, 84))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 4, 15, 9], fill=(226, 226, 228))
+    for x in range(1, 15, 2):
+        d.line([(x, 4), (x, 9)], fill=(190, 190, 196))
+    d.rectangle([0, 0, 1, 15], fill=(112, 80, 44))
+    d.rectangle([14, 0, 15, 15], fill=(112, 80, 44))
+    return im
+
+
+def _t_composter(part):
+    if part == "top":
+        im = _im((118, 84, 44))
+        d = ImageDraw.Draw(im)
+        d.rectangle([2, 2, 13, 13], fill=(60, 42, 26))
+        d.rectangle([4, 4, 11, 11], fill=(82, 58, 34))
+        for x, y in ((6, 6), (9, 8), (7, 10)):
+            d.point((x, y), fill=(86, 132, 44))
+        return _noise(im, 19, 5)
+    im = _im((122, 88, 46))
+    d = ImageDraw.Draw(im)
+    for x in (0, 5, 10, 15):
+        d.line([(x, 0), (x, 15)], fill=(64, 44, 22))
+    d.rectangle([0, 0, 15, 1], fill=(100, 70, 36))
+    return _noise(im, 20, 5)
+
+
+def _t_lectern(part):
+    if part == "top":
+        im = _im((152, 114, 68))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(106, 76, 42))
+        d.rectangle([2, 3, 13, 12], fill=(236, 230, 208), outline=(120, 90, 60))
+        d.line([(7, 3), (7, 12)], fill=(170, 150, 120))
+        for y in (5, 7, 9):
+            d.line([(3, y), (6, y)], fill=(190, 176, 150))
+            d.line([(9, y), (12, y)], fill=(190, 176, 150))
+        return im
+    return _noise(_t_planks((148, 110, 64), (104, 74, 40), (166, 128, 80)), 21, 4)
+
+
+def _t_enchant(part):
+    if part == "top":
+        im = _im((158, 28, 38))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(104, 16, 26))
+        d.rectangle([1, 1, 14, 14], outline=(200, 70, 60))
+        d.rectangle([5, 5, 10, 10], fill=(56, 120, 190), outline=(230, 230, 236))
+        d.line([(8, 5), (8, 10)], fill=(230, 230, 236))
+        return im
+    im = _noise(_im((26, 18, 40)), 22, 5)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 3], fill=(158, 28, 38))
+    d.line([(0, 4), (15, 4)], fill=(104, 16, 26))
+    for cx in (3, 12):
+        for dx, dy in ((0, 0), (-1, 1), (1, 1), (0, 2)):
+            d.point((cx + dx, 9 + dy), fill=(120, 230, 230))
+    return im
+
+
+def _t_anvil(part):
+    if part == "top":
+        im = _noise(_im((74, 74, 82)), 23, 5)
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 15, 15], outline=(40, 40, 46))
+        d.rectangle([3, 3, 12, 12], fill=(100, 100, 110))
+        return im
+    im = _noise(_im((58, 58, 66)), 24, 5)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 4], fill=(86, 86, 96))
+    d.rectangle([5, 5, 10, 11], fill=(48, 48, 54))
+    d.rectangle([2, 12, 13, 15], fill=(44, 44, 50))
+    return im
+
+
+def _t_stonecut(part):
+    im = _noise(_im((146, 146, 150)), 25, 8)
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, 15, 15], outline=(100, 100, 106))
+    if part == "top":
+        d.rectangle([2, 7, 13, 8], fill=(60, 60, 66))
+        d.ellipse([5, 3, 10, 12], fill=(206, 208, 214), outline=(120, 124, 132))
+        d.rectangle([7, 7, 8, 8], fill=(80, 80, 86))
+    else:
+        d.rectangle([0, 11, 15, 15], fill=(110, 110, 116))
+        d.rectangle([3, 3, 12, 8], fill=(126, 126, 132))
+    return im
+
+
+def _t_pumpkin(part, lit=False):
+    im = _im((208, 126, 26))
+    d = ImageDraw.Draw(im)
+    for x in (2, 6, 10, 14):
+        d.line([(x, 0), (x, 15)], fill=(172, 94, 16))
+    for x in (4, 8, 12):
+        d.line([(x, 0), (x, 15)], fill=(228, 148, 40))
+    im = _noise(im, 26, 5)
+    d = ImageDraw.Draw(im)
+    if part == "top":
+        d.rectangle([6, 6, 9, 9], fill=(100, 112, 42), outline=(70, 52, 24))
+    elif part == "front" and lit:
+        g, o = (255, 214, 74), (120, 60, 10)
+        d.polygon([(3, 6), (6, 6), (4, 3)], fill=g, outline=o)
+        d.polygon([(9, 6), (12, 6), (11, 3)], fill=g, outline=o)
+        d.rectangle([3, 9, 12, 12], fill=g, outline=o)
+        for x in (5, 8, 11):
+            d.line([(x, 9), (x, 10)], fill=o)
+    return im
+
+
+def _t_melon(part):
+    im = _im((116, 154, 42))
+    d = ImageDraw.Draw(im)
+    for x in (1, 5, 9, 13):
+        d.rectangle([x, 0, x + 1, 15], fill=(64, 104, 28))
+    for x in (3, 7, 11):
+        d.line([(x, 0), (x, 15)], fill=(144, 180, 58))
+    im = _noise(im, 27, 5)
+    if part == "top":
+        d = ImageDraw.Draw(im)
+        d.rectangle([6, 6, 9, 9], fill=(104, 96, 40), outline=(60, 80, 24))
+    return im
+
+
+def _t_bed(part):
+    wood, red, redd, white = (150, 112, 64), (176, 34, 38), (130, 22, 28), (238, 238, 240)
+    if part == "side":
+        im = _im(red, 16, 9)
+        d = ImageDraw.Draw(im)
+        d.line([(0, 4), (15, 4)], fill=redd)
+        d.rectangle([0, 5, 15, 8], fill=wood)
+        d.line([(0, 8), (15, 8)], fill=(100, 70, 38))
+        d.rectangle([5, 5, 10, 7], fill=(118, 84, 46))
+        return _noise(im, 28, 5)
+    im = _im(red)
+    d = ImageDraw.Draw(im)
+    if part == "head":
+        d.rectangle([1, 9, 14, 15], fill=white, outline=(190, 190, 200))
+        d.rectangle([1, 9, 14, 9], fill=(206, 206, 214))
+        d.line([(1, 8), (14, 8)], fill=redd)
+        d.rectangle([0, 0, 15, 15], outline=wood)
+        for y in (3, 6):
+            d.line([(1, y), (14, y)], fill=(160, 28, 32))
+    else:
+        d.line([(1, 12), (14, 12)], fill=redd)
+        d.rectangle([0, 0, 15, 15], outline=wood)
+        for y in (4, 8):
+            d.line([(1, y), (14, y)], fill=(160, 28, 32))
+        d.line([(1, 1), (14, 1)], fill=(200, 60, 60))
+    return _noise(im, 29, 4)
+
+
+_FT_BUILD = {
+    "chest_top": lambda: _t_chest("top", (168, 116, 48), (88, 56, 20), (196, 146, 70), 0, 0),
+    "chest_side": lambda: _t_chest("side", (168, 116, 48), (88, 56, 20), (196, 146, 70), 0, 0),
+    "chest_front": lambda: _t_chest("front", (168, 116, 48), (88, 56, 20), (196, 146, 70), (224, 224, 228), (66, 66, 72)),
+    "trapped_chest_top": lambda: _t_chest("top", (164, 108, 44), (84, 52, 18), (192, 140, 66), 0, 0),
+    "trapped_chest_side": lambda: _t_chest("side", (164, 108, 44), (84, 52, 18), (192, 140, 66), 0, 0),
+    "trapped_chest_front": lambda: _t_chest("front", (164, 108, 44), (84, 52, 18), (192, 140, 66), (214, 62, 50), (70, 20, 18)),
+    "ender_chest_top": lambda: _t_chest("top", (38, 56, 60), (12, 22, 26), (54, 88, 90), 0, 0),
+    "ender_chest_side": lambda: _t_chest("side", (38, 56, 60), (12, 22, 26), (54, 88, 90), 0, 0),
+    "ender_chest_front": lambda: _t_chest("front", (38, 56, 60), (12, 22, 26), (54, 88, 90), (70, 214, 180), (8, 40, 40)),
+    "barrel_open": lambda: _t_barrel("open"),
+    "barrel_side": lambda: _t_barrel("side"),
+    "crafting_top": lambda: _t_crafting("top"),
+    "crafting_side": lambda: _t_crafting("side"),
+    "furnace_top": lambda: _t_furnace("top", "furnace"),
+    "furnace_side": lambda: _t_furnace("side", "furnace"),
+    "furnace_front": lambda: _t_furnace("front", "furnace"),
+    "blast_top": lambda: _t_furnace("top", "blast"),
+    "blast_side": lambda: _t_furnace("side", "blast"),
+    "blast_front": lambda: _t_furnace("front", "blast"),
+    "smoker_top": lambda: _t_furnace("top", "smoker"),
+    "smoker_side": lambda: _t_furnace("side", "smoker"),
+    "smoker_front": lambda: _t_furnace("front", "smoker"),
+    "bookshelf_top": lambda: _t_bookshelf("top"),
+    "bookshelf_side": lambda: _t_bookshelf("side"),
+    "jukebox_top": lambda: _t_jukebox("top"),
+    "jukebox_side": lambda: _t_jukebox("side"),
+    "noteblock_top": lambda: _t_noteblock("top"),
+    "noteblock_side": lambda: _t_noteblock("side"),
+    "tnt_top": lambda: _t_tnt("top"),
+    "tnt_side": lambda: _t_tnt("side"),
+    "cartography_top": lambda: _t_cartography("top"),
+    "cartography_side": lambda: _t_cartography("side"),
+    "fletching_top": lambda: _t_fletching("top"),
+    "fletching_side": lambda: _t_fletching("side"),
+    "smithing_top": lambda: _t_smithing("top"),
+    "smithing_side": lambda: _t_smithing("side"),
+    "loom_top": lambda: _t_loom("top"),
+    "loom_side": lambda: _t_loom("side"),
+    "composter_top": lambda: _t_composter("top"),
+    "composter_side": lambda: _t_composter("side"),
+    "lectern_top": lambda: _t_lectern("top"),
+    "lectern_side": lambda: _t_lectern("side"),
+    "enchant_top": lambda: _t_enchant("top"),
+    "enchant_side": lambda: _t_enchant("side"),
+    "anvil_top": lambda: _t_anvil("top"),
+    "anvil_side": lambda: _t_anvil("side"),
+    "stonecut_top": lambda: _t_stonecut("top"),
+    "stonecut_side": lambda: _t_stonecut("side"),
+    "pumpkin_top": lambda: _t_pumpkin("top"),
+    "pumpkin_side": lambda: _t_pumpkin("side"),
+    "lit_pumpkin_top": lambda: _t_pumpkin("top", True),
+    "lit_pumpkin_side": lambda: _t_pumpkin("side", True),
+    "lit_pumpkin_front": lambda: _t_pumpkin("front", True),
+    "melon_top": lambda: _t_melon("top"),
+    "melon_side": lambda: _t_melon("side"),
+    "bed_head_top": lambda: _t_bed("head"),
+    "bed_foot_top": lambda: _t_bed("foot"),
+    "bed_side": lambda: _t_bed("side"),
+}
+_FT_BASE = {   # блок -> (низ-имя текстур, есть ли отдельная «морда»)
+    "chest": ("chest", True), "trapped_chest": ("trapped_chest", True), "ender_chest": ("ender_chest", True),
+    "furnace": ("furnace", True), "blast_furnace": ("blast", True), "smoker": ("smoker", True),
+    "barrel": ("barrel", False), "crafting_table": ("crafting", False), "bookshelf": ("bookshelf", False),
+    "jukebox": ("jukebox", False), "noteblock": ("noteblock", False), "tnt": ("tnt", False),
+    "cartography_table": ("cartography", False), "fletching_table": ("fletching", False),
+    "smithing_table": ("smithing", False), "loom": ("loom", False), "composter": ("composter", False),
+    "lectern": ("lectern", False), "enchanting_table": ("enchant", False), "anvil": ("anvil", False),
+    "stonecutter_block": ("stonecut", False), "pumpkin": ("pumpkin", False), "lit_pumpkin": ("lit_pumpkin", True),
+    "melon_block": ("melon", False), "bed": ("bed", False),
+}
+_FT_CACHE = {}
+_TR = getattr(Image, "Transpose", Image)
+_TF = getattr(Image, "Transform", Image)
+_RS = getattr(Image, "Resampling", Image)
+_FV = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+_FROT = [   # как np.rot90(g, k, axes=(0, 2)) поворачивает направления (dx, dz)
+    {"east": (1, 0), "west": (-1, 0), "south": (0, 1), "north": (0, -1)},
+    {"east": (0, 1), "west": (0, -1), "south": (-1, 0), "north": (1, 0)},
+    {"east": (-1, 0), "west": (1, 0), "south": (0, -1), "north": (0, 1)},
+    {"east": (0, -1), "west": (0, 1), "south": (1, 0), "north": (-1, 0)},
+]
+
+
+def _ftex(name):
+    t = _FT_CACHE.get(name)
+    if t is None:
+        try:
+            t = _FT_BUILD[name]()
+        except Exception:
+            t = _im((200, 0, 200))
+        _FT_CACHE[name] = t
+    return t
+
+
+def _furn_desc(nm, fk):
+    """Имя из палитры -> описание отрисовки мебели или None (обычный куб)."""
+    p = nm.split(":")
+    b = p[0]
+    if b not in _FT_BASE:
+        return None
+    pre, has_front = _FT_BASE[b]
+    rot = _FROT[fk % 4]
+    d = {"hf": 1.0, "fvec": None, "top": pre + "_top", "side": pre + "_side", "front": None, "otop": None, "emis": b == "lit_pumpkin"}
+    if b == "bed":
+        f = p[1] if len(p) > 1 and p[1] in _FV else "south"
+        part = p[2] if len(p) > 2 and p[2] in ("head", "foot") else "foot"
+        d.update(hf=9.0 / 16, top="bed_%s_top" % part, side="bed_side", otop=rot[f])
+        return d
+    face = p[1] if len(p) > 1 else None
+    if b == "barrel":
+        face = face if face in ("up", "down", "north", "south", "east", "west") else "up"
+        if face == "up":
+            d.update(top="barrel_open", side="barrel_side")
+        elif face == "down":
+            d.update(top="barrel_side", side="barrel_side")
+        else:
+            d.update(top="barrel_side", side="barrel_side", front="barrel_open", fvec=rot[face])
+        return d
+    if has_front:
+        face = face if face in _FV else "south"
+        d.update(front=pre + "_front", fvec=rot[face])
+        if b == "lit_pumpkin":
+            d["side"] = "lit_pumpkin_side"
+    if b == "lectern":
+        face = face if face in _FV else "south"
+        d.update(otop=rot[face])
+    return d
+
+
+def _fshade(tex, f):
+    a = np.asarray(tex, dtype=np.float32).copy()
+    a[..., :3] *= f
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGBA")
+
+
+def _fwarp(tex, p0, eu, ev):
+    """Натягивает текстуру на параллелограмм p0, p0+eu, p0+eu+ev, p0+ev. Возвращает (плитка, смещение x, смещение y)."""
+    tw, th = tex.size
+    xs = (p0[0], p0[0] + eu[0], p0[0] + ev[0], p0[0] + eu[0] + ev[0])
+    ys = (p0[1], p0[1] + eu[1], p0[1] + ev[1], p0[1] + eu[1] + ev[1])
+    bx0, by0 = int(math.floor(min(xs))), int(math.floor(min(ys)))
+    bw, bh = int(math.ceil(max(xs))) - bx0 + 1, int(math.ceil(max(ys))) - by0 + 1
+    det = eu[0] * ev[1] - ev[0] * eu[1]
+    i00, i01, i10, i11 = ev[1] / det, -ev[0] / det, -eu[1] / det, eu[0] / det
+    px, py = p0[0] - bx0, p0[1] - by0
+    data = (tw * i00, tw * i01, -tw * (i00 * px + i01 * py), th * i10, th * i11, -th * (i10 * px + i11 * py))
+    return tex.transform((bw, bh), _TF.AFFINE, data, _RS.NEAREST), bx0, by0
+
+
+def _iso_view(g, pal, k, W, H, ss, fk=None):
     a = np.ascontiguousarray(np.rot90(g, k, axes=(0, 2)))
     X, Y, Z = a.shape
     n_pal = len(pal)
+    fkk = k if fk is None else fk
+    fdesc = [None] * n_pal
     trans = np.zeros(n_pal, dtype=bool)
     for i, nm in enumerate(pal):
         if i and D[nm][2] in ("g", "t"):
             trans[i] = True
+        if i:
+            try:
+                fdesc[i] = _furn_desc(nm, fkk)
+            except Exception:
+                fdesc[i] = None
+            if fdesc[i] is not None and fdesc[i]["hf"] < 1.0:
+                trans[i] = True                      # низкая мебель (кровать): соседние стены видны над ней
 
     def nb(axis):
         n = np.zeros_like(a)
@@ -682,6 +1241,39 @@ def _iso_view(g, pal, k, W, H, ss):
             c = colors[kk] = (fill, edge)
         return c
 
+    ftiles = {}
+
+    def ftile(v, face):
+        """Плитка текстуры мебели для грани (кэш: одинакова для всех блоков одного вида)."""
+        kk = (v, face)
+        r_ = ftiles.get(kk)
+        if r_ is None:
+            fd = fdesc[v]
+            hf = fd["hf"]
+            if face == "t":
+                tex = _ftex(fd["top"])
+                od = fd["otop"]
+                if od is not None and od != (0, 1):
+                    tex = tex.transpose({(0, -1): _TR.ROTATE_180, (1, 0): _TR.ROTATE_90, (-1, 0): _TR.ROTATE_270}.get(od, _TR.ROTATE_180))
+                p0, eu, ev = (0.0, -s * hf), (w, h), (-w, h)
+                po = [p0, (p0[0] + eu[0], p0[1] + eu[1]), (p0[0] + eu[0] + ev[0], p0[1] + eu[1] + ev[1]), (p0[0] + ev[0], p0[1] + ev[1])]
+            elif face == "l":
+                front = fd["front"] is not None and fd["fvec"] == (0, 1)
+                tex = _ftex(fd["front"] if front else fd["side"])
+                p0, eu, ev = (-w, h - s * hf), (w, h), (0.0, s * hf)
+                po = [p0, (p0[0] + eu[0], p0[1] + eu[1]), (p0[0] + eu[0] + ev[0], p0[1] + eu[1] + ev[1]), (p0[0] + ev[0], p0[1] + ev[1])]
+            else:
+                front = fd["front"] is not None and fd["fvec"] == (1, 0)
+                tex = _ftex(fd["front"] if front else fd["side"])
+                p0, eu, ev = (0.0, 2 * h - s * hf), (w, -h), (0.0, s * hf)
+                po = [p0, (p0[0] + eu[0], p0[1] + eu[1]), (p0[0] + eu[0] + ev[0], p0[1] + eu[1] + ev[1]), (p0[0] + ev[0], p0[1] + ev[1])]
+            f = 1.0 if fd["emis"] else FACE[face]
+            tex = _fshade(tex, f)
+            mean = tuple(int(c) for c in np.asarray(tex, dtype=np.float32)[..., :3].reshape(-1, 3).mean(axis=0))
+            tile, bx, by = _fwarp(tex, p0, eu, ev)
+            r_ = ftiles[kk] = (tile, bx, by, po, mean + (255,))
+        return r_
+
     xs, ys, zs = idx[:, 0], idx[:, 1], idx[:, 2]
     nzs = ((xs * 73856093) ^ (ys * 19349663) ^ (zs * 83492791)) % 7
     vals = a[xs, ys, zs]
@@ -692,6 +1284,14 @@ def _iso_view(g, pal, k, W, H, ss):
     for i in range(len(xs)):
         x0, y0 = float(sx0[i]), float(sy0[i])
         v, nz = int(vals[i]), int(nzs[i])
+        if fdesc[v] is not None:
+            for fl_, fc in ((FY[i], "t"), (FZ[i], "l"), (FX[i], "r")):
+                if not fl_:
+                    continue
+                tile, bx, by, po, mean = ftile(v, fc)
+                poly([(x0 + q[0], y0 + q[1]) for q in po], fill=mean, outline=(0, 0, 0, 70) if outline else None)
+                img.paste(tile, (int(round(x0)) + bx, int(round(y0)) + by), tile)
+            continue
         if FY[i]:
             f, e = col(v, "t", nz)
             poly([(x0, y0 - s), (x0 + w, y0 - s + h), (x0, y0 - s + 2 * h), (x0 - w, y0 - s + h)], fill=f, outline=e if outline else None)
@@ -885,6 +1485,48 @@ WORLD_MIN_Y = -64
 SPAWN = (0, -60, 0)             # игрок появляется здесь (поверхность травы на y=-61)
 
 
+# ─── 3.0-furnviz: блок-сущности. БЕЗ них Bedrock не рисует сундуки и кровати (блок есть, но невидимый) ───────────
+BE_NAME = {"chest": "Chest", "trapped_chest": "Chest", "ender_chest": "EnderChest", "bed": "Bed"}
+
+
+def _be_fields(base, x, y, z):
+    kind = BE_NAME[base]
+    f = []
+    if kind == "Chest":
+        f += [b"\x09" + _ns("Items") + b"\x0a" + struct.pack("<i", 0), n_byte("Findable", 0)]
+    if kind == "Bed":
+        f.append(n_byte("color", 14))                    # 14 = красная кровать
+    f += [n_str("id", kind), n_byte("isMovable", 1), n_int("x", x), n_int("y", y), n_int("z", z)]
+    return f
+
+
+def _be_cells(r):
+    """[(x, y, z, базовый блок)] клеток постройки, которым нужна блок-сущность."""
+    out = []
+    for i, nm in enumerate(r.pal):
+        base = nm.split(":")[0]
+        if i and base in BE_NAME:
+            for x, y, z in np.argwhere(r.g == i):
+                out.append((int(x), int(y), int(z), base))
+    return out
+
+
+def _struct_bpd(r):
+    """block_position_data для .mcstructure: индекс клетки -> block_entity_data."""
+    Y, Z = r.d[1], r.d[2]
+    return b"".join(n_comp(str((x * Y + y) * Z + z), [n_comp("block_entity_data", _be_fields(b, x, y, z))])
+                    for x, y, z, b in _be_cells(r))
+
+
+def _world_bes(r, BX, BY, BZ):
+    """{(cx, cz): байты блок-сущностей чанка} для .mcworld (ключ чанка 0x31)."""
+    ch = {}
+    for x, y, z, b in _be_cells(r):
+        wx, wy, wz = BX + x, BY + y, BZ + z
+        ch.setdefault((wx // 16, wz // 16), []).append(n_comp("", _be_fields(b, wx, wy, wz)))
+    return {k: b"".join(v) for k, v in ch.items()}
+
+
 def build_world_files(r, title, opts=None):
     """Возвращает {путь внутри архива: bytes} для .mcworld."""
     X, Y, Z = r.d
@@ -902,6 +1544,7 @@ def build_world_files(r, title, opts=None):
             names.append(n)
         lut[i] = wp[n]
     G = lut[r.g]                                         # [x,y,z] с id мира
+    be_chunks = _world_bes(r, BX, BY, BZ)
     top_cy = (BY + Y - 1) // 16                          # индекс верхнего подчанка (floor-деление)
     nsub = top_cy - (WORLD_MIN_Y // 16) + 1
     cx0, cx1 = (min(0, BX) - 16) // 16, (BX + X + 16) // 16
@@ -920,6 +1563,8 @@ def build_world_files(r, title, opts=None):
                 y0 = BY - WORLD_MIN_Y
                 col[x0 - wx0:x1 - wx0, y0:y0 + Y, z0 - wz0:z1 - wz0] = G[x0 - BX:x1 - BX, :, z0 - BZ:z1 - BZ]
             key = struct.pack("<ii", cx, cz)
+            if be_chunks.get((cx, cz)):
+                items[key + b"\x31"] = be_chunks[(cx, cz)]                    # блок-сущности (сундуки, кровати)
             ytop = int(np.nonzero(col.any(axis=(0, 2)))[0].max()) + 1
             items[key + b"\x2c"] = bytes([41])                                    # версия чанка (1.21.40+)
             items[key + b"\x36"] = struct.pack("<i", 2)                           # чанк полностью создан
@@ -2545,7 +3190,7 @@ def render_interior(r, W=900, H=720):
         try:
             a = np.ascontiguousarray(np.rot90(g, k, axes=(0, 2)))
             a[a.shape[0] // 2:, :, a.shape[2] // 2:] = 0
-            out.append((_png(_iso_view(a, pal, 0, W * ss, H * ss, ss)), "🏠 Разрез %d/4 — вид изнутри с нового ракурса%s" % (k + 1, note)))
+            out.append((_png(_iso_view(a, pal, 0, W * ss, H * ss, ss, fk=k)), "🏠 Разрез %d/4 — вид изнутри с нового ракурса%s" % (k + 1, note)))
         except Exception:
             log.warning("interior view %d: %s", k, traceback.format_exc())
     for n, cut in enumerate(_floor_cuts(g), 1):
