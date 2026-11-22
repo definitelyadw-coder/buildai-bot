@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.3-vision"
+BOT_VERSION = "3.4-blocks"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -179,8 +179,18 @@ stonecutter_block 8b8b8b - s
 pumpkin d9801e - n
 lit_pumpkin f0a030 - e
 melon_block 6f9a2b - n
-bed 7b5a33 a12722 w"""
+bed 7b5a33 a12722 w
+cream_concrete e8dfb4 - s
+oak_fence b8945f - g
+campfire e8a040 - e
+cobweb f0f0f0 - g
+vine 4f8a2e - g"""
 DIRS4 = ("north", "south", "east", "west")
+# ===BLOCKS-BLOCK===
+VINE_BITS = {"south": 1, "west": 2, "north": 4, "east": 8}                                        # vine_direction_bits
+BE_ID = {"bricks": "brick_block", "oak_fence": "fence", "cobweb": "web", "cream_concrete": "smooth_sandstone"}   # имя в палитре -> ID в Bedrock
+BLOCK_ALIAS = {"brick": "bricks", "brick_block": "bricks", "fence": "oak_fence", "wooden_fence": "oak_fence", "web": "cobweb",
+               "cobwebs": "cobweb", "vines": "vine", "camp_fire": "campfire", "cream": "cream_concrete"}   # что ИИ может написать вместо
 FACE4 = ("chest", "trapped_chest", "ender_chest", "furnace", "blast_furnace", "smoker", "lectern")   # b:"chest:north" = лицом на север
 BAR_DIR = {"down": 0, "up": 1, "north": 2, "south": 3, "west": 4, "east": 5}                        # facing_direction бочки
 BED_DIR = {"south": 0, "west": 1, "north": 2, "east": 3}                                           # direction кровати = куда смотрит изголовье
@@ -196,7 +206,7 @@ class BlockTable(dict):
         if not dict.__contains__(self, b):
             return False
         if len(p) == 2:
-            return (b in FACE4 and p[1] in DIRS4) or (b == "barrel" and p[1] in BAR_DIR)
+            return (b in FACE4 and p[1] in DIRS4) or (b == "barrel" and p[1] in BAR_DIR) or (b == "vine" and p[1] in DIRS4)
         return len(p) == 3 and b == "bed" and p[1] in BED_DIR and p[2] in ("foot", "head")
 
     def __contains__(self, k):
@@ -230,7 +240,10 @@ def block_states(name):
         return b, st
     if len(p) == 1 and b == "barrel":                                # без направления: открытой стороной вверх
         return b, [(3, "facing_direction", 1), (1, "open_bit", 0)]
-    return b, []
+    if b == "vine":                                                  # vine:north = стена, к которой крепится лоза, с северной стороны
+        d_ = p[1] if len(p) == 2 and p[1] in VINE_BITS else "south"
+        return b, [(3, "vine_direction_bits", VINE_BITS[d_])]
+    return BE_ID.get(b, b), []
 
 
 D = BlockTable()   # имя -> (цвет бока, цвет верха или None, флаг)
@@ -240,7 +253,7 @@ for _ln in (BL.strip() + "\n" + BL_EXTRA).split("\n"):
 
 SYS_PROMPT = """You are a master builder for Minecraft Bedrock 1.21.50. First think the build through in your head: write a plan in Russian, no markdown (size, materials, roof, windows, lights, details). Then output the final build in ONE ```json block:
 {"name":"castle","ops":[{"t":"fill","b":"stone_bricks","a":[0,0,0],"c":[20,0,20]},{"t":"hollow","b":"oak_planks","a":[2,1,2],"c":[18,6,18]},{"t":"set","b":"glass","a":[5,3,2]}]}
-Rules: x=east, y=up, z=south; integers; start near 0; any size up to 128 per axis. Ops apply in order, later ones overwrite; use b:"air" to carve doors and windows. No stairs, slabs or doors: only full blocks, plus the furniture blocks below. FURNITURE: chest, trapped_chest, ender_chest, barrel, crafting_table, furnace, blast_furnace, smoker, bookshelf, jukebox, noteblock, tnt, cartography_table, fletching_table, smithing_table, loom, composter, lectern, enchanting_table, anvil, stonecutter_block, pumpkin, lit_pumpkin, melon_block. Place each with one "set" (or a row with fill/line), inside rooms, front facing the room. chest, trapped_chest, ender_chest, furnace, blast_furnace, smoker and lectern take a facing suffix: b:"chest:north" (north/south/east/west = the side the FRONT looks at; north=-z, south=+z, east=+x, west=-x); barrel also accepts up/down (b:"barrel:up"). Facing is not flipped by mirror: place facing blocks after the mirror. BED: one op {"t":"bed","a":[x,y,z],"f":"south"}: foot at a, head one block further in direction f (2 long, 1 wide); lay it on the floor with the head against a wall; colour is always red.
+Rules: x=east, y=up, z=south; integers; start near 0; any size up to 128 per axis. Ops apply in order, later ones overwrite; use b:"air" to carve doors and windows. No stairs, slabs or doors: only full blocks, plus the furniture blocks below. FURNITURE: chest, trapped_chest, ender_chest, barrel, crafting_table, furnace, blast_furnace, smoker, bookshelf, jukebox, noteblock, tnt, cartography_table, fletching_table, smithing_table, loom, composter, lectern, enchanting_table, anvil, stonecutter_block, pumpkin, lit_pumpkin, melon_block. Place each with one "set" (or a row with fill/line), inside rooms, front facing the room. chest, trapped_chest, ender_chest, furnace, blast_furnace, smoker and lectern take a facing suffix: b:"chest:north" (north/south/east/west = the side the FRONT looks at; north=-z, south=+z, east=+x, west=-x); barrel also accepts up/down (b:"barrel:up"). Facing is not flipped by mirror: place facing blocks after the mirror. BED: one op {"t":"bed","a":[x,y,z],"f":"south"}: foot at a, head one block further in direction f (2 long, 1 wide); lay it on the floor with the head against a wall; colour is always red. DECOR: bricks (red brick), cream_concrete (smooth cream block for walls and floors), oak_fence (thin 1-block fence for railings, garden and yard fences; it connects to neighbouring blocks by itself), campfire (put it on a solid block and keep the block above it empty), cobweb (corners, ruins, haunted rooms), vine (clings to a wall: b:\"vine:north\" means the wall is on the NORTH side of the vine; vine:south, vine:east, vine:west the same; place vines in a vertical column right next to a solid block).
 Ops:
 - "fill": solid box a..c. "hollow": box walls only (interior becomes air). "set": one block at a. "line": straight 3D line of blocks from a to c.
 - "cylinder": {"t":"cylinder","b":"stone_bricks","a":[cx,y,cz],"r":5,"h":8,"hollow":false}. Vertical round column; a = centre of the bottom layer, r = radius, h = height; hollow = walls only, open top and bottom.
@@ -417,6 +430,10 @@ def run_spec(spec, prem=False):
         if t not in ("fill", "hollow", "set"):
             bad += 1
             continue
+        if b in BLOCK_ALIAS:
+            b = BLOCK_ALIAS[b]
+        elif ":" in b and b.split(":")[0] in BLOCK_ALIAS:
+            b = BLOCK_ALIAS[b.split(":")[0]] + ":" + b.split(":", 1)[1]
         if b != "air" and b not in D and ":" in b and b.split(":")[0] in D:      # «chest:up» и т.п.: берём блок без направления
             b = b.split(":")[0]
         if b != "air" and b not in D:
