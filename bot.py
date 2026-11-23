@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.6.1-fallback"
+BOT_VERSION = "3.6.2-wool"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -184,13 +184,39 @@ cream_concrete e8dfb4 - s
 oak_fence b8945f - g
 campfire e8a040 - e
 cobweb f0f0f0 - g
-vine 4f8a2e - g"""
+vine 4f8a2e - g
+orange_wool f07613 - w
+magenta_wool bd44b3 - w
+light_blue_wool 3aafd9 - w
+yellow_wool f8c527 - w
+lime_wool 70b919 - w
+pink_wool ed8dac - w
+gray_wool 3e4447 - w
+light_gray_wool 8e8e86 - w
+cyan_wool 158991 - w
+purple_wool 792aac - w
+brown_wool 724728 - w
+green_wool 546d1b - w
+birch_leaves 80a755 - n
+jungle_leaves 3f8f1c - n
+acacia_leaves 6a9a2c - n
+dark_oak_leaves 3a6a1a - n
+mangrove_leaves 5c8a33 - n
+cherry_leaves efa6c6 - n
+azalea_leaves 5f8a3a - n
+flowering_azalea_leaves 7a8f4a - n"""
 DIRS4 = ("north", "south", "east", "west")
 # ===BLOCKS-BLOCK===
 VINE_BITS = {"south": 1, "west": 2, "north": 4, "east": 8}                                        # vine_direction_bits
-BE_ID = {"bricks": "brick_block", "oak_fence": "fence", "cobweb": "web", "cream_concrete": "smooth_sandstone"}   # имя в палитре -> ID в Bedrock
+BE_ID = {"bricks": "brick_block", "oak_fence": "fence", "cobweb": "web", "cream_concrete": "smooth_sandstone", "flowering_azalea_leaves": "azalea_leaves_flowered"}   # имя в палитре -> ID в Bedrock
 BLOCK_ALIAS = {"brick": "bricks", "brick_block": "bricks", "fence": "oak_fence", "wooden_fence": "oak_fence", "web": "cobweb",
                "cobwebs": "cobweb", "vines": "vine", "camp_fire": "campfire", "cream": "cream_concrete"}   # что ИИ может написать вместо
+BLOCK_ALIAS.update({"sakura_leaves": "cherry_leaves", "cherry_blossom_leaves": "cherry_leaves", "cherry_leaf": "cherry_leaves",
+                    "sakura": "cherry_leaves", "pink_leaves": "cherry_leaves", "cherry_blossom": "cherry_leaves",
+                    "azalea_leaves_flowered": "flowering_azalea_leaves", "flowering_azalea": "flowering_azalea_leaves",
+                    "blossom_leaves": "flowering_azalea_leaves", "leaves": "oak_leaves", "oak_leaf": "oak_leaves", "leaf": "oak_leaves",
+                    "wool": "white_wool", "light_grey_wool": "light_gray_wool", "grey_wool": "gray_wool", "silver_wool": "light_gray_wool",
+                    "lightgray_wool": "light_gray_wool", "lightblue_wool": "light_blue_wool", "purple_wool_block": "purple_wool"})   # 3.6.2
 FACE4 = ("chest", "trapped_chest", "ender_chest", "furnace", "blast_furnace", "smoker", "lectern")   # b:"chest:north" = лицом на север
 BAR_DIR = {"down": 0, "up": 1, "north": 2, "south": 3, "west": 4, "east": 5}                        # facing_direction бочки
 BED_DIR = {"south": 0, "west": 1, "north": 2, "east": 3}                                           # direction кровати = куда смотрит изголовье
@@ -223,7 +249,7 @@ def block_states(name):
     p = name.split(":")
     b = p[0]
     if b.endswith("_leaves"):
-        return b, [(1, "persistent_bit", 1), (1, "update_bit", 0)]
+        return BE_ID.get(b, b), [(1, "persistent_bit", 1), (1, "update_bit", 0)]
     if len(p) == 2 and b in FACE4 and p[1] in DIRS4:
         st = [(8, "minecraft:cardinal_direction", p[1])]
         if b == "lectern":
@@ -437,8 +463,9 @@ def run_spec(spec, prem=False):
         if b != "air" and b not in D and ":" in b and b.split(":")[0] in D:      # «chest:up» и т.п.: берём блок без направления
             b = b.split(":")[0]
         if b != "air" and b not in D:
-            unk.add(b)
-            b = "stone"
+            sub = next((v for suf, v in (("_leaves", "oak_leaves"), ("_wool", "white_wool"), ("_planks", "oak_planks"), ("_log", "oak_log")) if b.endswith(suf)), "stone")
+            unk.add("%s→%s" % (b, sub))
+            b = sub
         ops.append({"t": t, "b": b, "a": a, "c": c})
     mn = [10 ** 9] * 3
     for o in ops:
@@ -2711,7 +2738,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
         if part:
             cap += "\n⚠ Ответ ИИ оборвался, показана собранная часть. Нажми «Заново» или попроси достроить: /edit …"
         if r.unk:
-            cap += "\n⚠ Неизвестные блоки заменены камнем: " + ", ".join(r.unk[:6])
+            cap += "\n⚠ Неизвестные блоки заменены: " + ", ".join(r.unk[:6])
         cap += "\n\nНравится? Жми «Беру» — пришлю мир с постройкой у спавна.\nХочешь поменять — напиши /edit что изменить."
         if not prem:
             if CITY_RE.search(q) or max(r.d[0], r.d[2]) >= 120:
