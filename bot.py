@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.5.1-cffix"
+BOT_VERSION = "3.5.2-cfmodels"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -1671,7 +1671,7 @@ START_TS = time.time()
 def default_state():
     return {"v": 1, "mode": "on", "mode_msg": "", "model": TH_MODEL, "keys": [], "limit": DAILY_LIMIT,
             "banned": [], "users": {}, "builds": {}, "last": {}, "seq": 0, "bk_msg": 0,
-            "cf": [], "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
+            "cf": [], "cfdead": {}, "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
             "stats": {"builds": 0, "ok": 0, "fail": 0, "worlds": 0, "structs": 0}}
 
 
@@ -2022,7 +2022,8 @@ def _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, extra, ab
         if "event-stream" not in r.headers.get("content-type", "").lower():
             j = r.json()
             msg0 = (j.get("choices") or [{}])[0].get("message", {}) or {}
-            txt0 = msg0.get("content") or ""
+            txt0 = msg0.get("content")
+            txt0 = "" if txt0 is None else str(txt0)
             if abort_on_reasoning and not txt0 and any(isinstance(v_, str) and v_ for k_, v_ in msg0.items() if k_ not in ("content", "role")):
                 raise ReasoningSeen()
             if txt0:
@@ -2047,6 +2048,8 @@ def _llm_stream_once(key, messages, model, on_chunk, cancel, deadline, extra, ab
             except Exception:
                 continue
             c = delta.get("content")
+            if c is not None and not isinstance(c, str):      # Cloudflare иногда присылает число: приводим к тексту
+                c = str(c)
             if isinstance(delta, dict):
                 for k_, v_ in delta.items():
                     if k_ not in ("content", "role") and isinstance(v_, str) and v_:
@@ -2694,7 +2697,7 @@ HELP = ("👋 Я строю постройки для Minecraft Bedrock с по�
         "🧱 /build <что построить> — например:\n/build средневековый замок с башнями и рвом\n\n"
         "✏️ /edit <что поменять> — доработать последнюю постройку\n"
         "📷 Фото: пришли картинку с подписью /build … — ИИ посмотрит и повторит\n🌐 ИИ сам ищет референсы в интернете; можно вставить ссылку\n"
-        "🤖 /model — выбрать ИИ (4 бесплатные модели; у Premium ещё 6 от Cloudflare)\n"
+        "🤖 /model — выбрать ИИ (4 бесплатные модели; у Premium ещё модели Cloudflare)\n"
         "📚 /mybuilds — история твоих построек (5 штук, у Premium 30)\n"
         "⚙️ /settings — настройки: режим «Размышления»\n"
         "🛑 /cancel — остановить текущую\n"
@@ -2725,7 +2728,7 @@ def model_text(uid):
     prem = is_prem(uid)
     t = "🤖 Выбери ИИ, который будет строить. Все модели бесплатные; если одна строит плохо или занята — попробуй другую.\n\n"
     if any(not cf_dead(m) for m in CF_IDS):
-        t += "☁️ Модели Cloudflare — " + ("для тебя открыты 👑\n\n" if prem else "только для Premium 🔒 (мощнее: GPT-OSS 120B, Llama 70B, Qwen): /premium\n\n")
+        t += "☁️ Модели Cloudflare — " + ("для тебя открыты 👑\n\n" if prem else "только для Premium 🔒 (мощнее: GPT-OSS 120B, Llama 70B, Gemma 4): /premium\n\n")
     stored = (S.d["users"].get(str(uid)) or {}).get("model")
     if stored in CF_NAME and user_model(uid) != stored:
         t += "Выбранная тобой %s сейчас недоступна, поэтому строит %s.\n\n" % (mname(stored), mname(user_model(uid)))
@@ -3243,7 +3246,7 @@ def premium_text(uid):
         "🔎 Масштаб ×2 / ×3 в один клик: маленький дом → особняк, попытки не тратятся\n"
         "✨ Авто-улучшение одной кнопкой, правки /edit бесплатны\n"
         "⚡ Без очереди и пауза 5 с вместо %d\n"
-        "☁️ Модели Cloudflare в /model: GPT-OSS 120B, Llama 3.3 70B, Qwen — мощнее обычных\n"
+        "☁️ Модели Cloudflare в /model: GPT-OSS 120B, Llama 3.3 70B, Gemma 4 — мощнее обычных\n"
         "📚 История построек /mybuilds: хранит %d вместо %d\n"
         "🌍 Тема мира и время суток: снег, песок, ночь с огнями (/world)\n"
         "👑 Значок Premium в /me") % (S.d["prem_limit"], S.d["limit"] or 5, COOLDOWN_SEC, MB_PREM, MB_FREE)
@@ -4121,13 +4124,16 @@ def mb_callback(cq, data):
 
 
 # ─── Cloudflare Workers AI: только бесплатные модели и только для Premium ───────────────────────────────
-CF_MODELS = [                      # список взят из проекта MultiLLM (BUILTIN.cloudflare.models); все работают на бесплатном тарифе Workers AI
+CF_MODELS = [                      # кандидаты; бот сам проверяет каждую модель (/testcf и автопроверка раз в 12 часов) и прячет из /model те, что не отвечают
     ("@cf/openai/gpt-oss-120b", "GPT-OSS 120B"),
     ("@cf/meta/llama-3.3-70b-instruct-fp8-fast", "Llama 3.3 70B"),
-    ("@cf/qwen/qwen3-30b-a3b-fp8", "Qwen3 30B"),
+    ("@cf/google/gemma-4-26b-a4b-it", "Gemma 4 26B"),
+    ("@cf/qwen/qwen3.8-27b", "Qwen3.8 27B"),
     ("@cf/qwen/qwen2.5-coder-32b-instruct", "Qwen2.5 Coder 32B"),
-    ("@cf/qwen/qwq-32b", "QwQ 32B"),
+    ("@cf/zai-org/glm-4.7-flash", "GLM 4.7 Flash"),
     ("@cf/openai/gpt-oss-20b", "GPT-OSS 20B"),
+    ("@cf/meta/llama-4-scout-17b-16e-instruct", "Llama 4 Scout 17B"),
+    ("@cf/mistralai/mistral-small-3.1-24b-instruct", "Mistral Small 3.1 24B"),
 ]
 CF_IDS = [m[0] for m in CF_MODELS]
 CF_NAME = dict(CF_MODELS)
@@ -4138,7 +4144,6 @@ VIS_NO.update(CF_IDS)                          # картинки им не шл
 CF_API = _env("CF_API", "https://api.cloudflare.com").rstrip("/")
 CF_KEYS_ENV = [x for x in re.split(r"[,\s]+", _env("CF_KEYS", "")) if ":" in x]      # account_id:token через запятую
 CF_ADMIN_CMDS = ("addcf", "cfkeys", "cf", "delcf", "testcf")
-CF_DEAD = {}                                   # модель -> до какого времени считаем её недоступной (в памяти)
 CF_LADDER = (16000, 8000, 4000, 2000)          # лимит длины ответа: у Cloudflare по умолчанию слишком короткий, просим явно и снижаем, если не принял
 _LLMX = threading.local()                      # адрес и лимит ответа для _llm_stream_once (ставит cf_complete)
 
@@ -4148,7 +4153,14 @@ def cf_url(acct):
 
 
 def cf_dead(model):
-    return CF_DEAD.get(model, 0) > time.time()
+    return S.d.get("cfdead", {}).get(model, 0) > time.time()
+
+
+def cf_kill(model, secs):
+    """Спрятать модель из /model на время (хранится в состоянии и переживает перезапуск)."""
+    with S.lock:
+        S.d.setdefault("cfdead", {})[model] = time.time() + secs
+    S.save()
 
 
 def cf_add(acct, tok, note=""):
@@ -4246,9 +4258,9 @@ def cf_complete(messages, on_chunk, cancel, model, deadline=None):
                 elif kind == "server":
                     cf_mark(k, cool=time.time() + 30, why="HTTP %s, пауза 30 с" % e.code, err=k["err"] + 1)
                 elif kind in ("paid", "nomodel"):
-                    CF_DEAD[model] = time.time() + (6 if kind == "paid" else 24) * 3600
-                    notify_admins_once("cfdead" + model, "☁️ Cloudflare не отдаёт модель %s (HTTP %s: %s). Спрятал её из /model на %d ч. Проверить все модели: /testcf" % (
-                        model, e.code, "нужен платный тариф" if kind == "paid" else "модели нет", 6 if kind == "paid" else 24))
+                    cf_kill(model, (6 if kind == "paid" else 24 * 7) * 3600)
+                    notify_admins_once("cfdead" + model, "☁️ Cloudflare не отдаёт модель %s (HTTP %s: %s). Спрятал её из /model на %s. Проверить все модели: /testcf" % (
+                        model, e.code, "нужен платный тариф" if kind == "paid" else "модель снята или не найдена", "6 часов" if kind == "paid" else "7 дней"))
                     raise LLMError("модель «%s» сейчас недоступна на Cloudflare. Выбери другую: /model" % mname(model), "model")
                 else:
                     notify_admins_once("cfbad" + model, "⚠️ Cloudflare отклонил запрос (HTTP %s): %s\nМодель: %s" % (e.code, body[:200], model))
@@ -4301,42 +4313,74 @@ def fmt_cf():
             "\n\nЛимит бесплатного аккаунта: 10 000 нейронов в сутки, обнуляется в %s по времени бота. Больше аккаунтов = больше запросов." % cf_reset_text())
 
 
+CF_SCAN_LOCK = threading.Lock()
+
+
+def cf_scan():
+    """Проверяет ключи и каждую модель реальным запросом. Недоступные модели прячутся, ожившие возвращаются. -> (по ключам, по моделям)"""
+    with CF_SCAN_LOCK:
+        return _cf_scan()
+
+
+def _cf_scan():
+    keys_res, good = [], None
+    for i, k in enumerate(list(S.d["cf"]), 1):
+        kind, info = cf_probe_key(k["a"], k["k"])
+        with S.lock:
+            for x in S.d["cf"]:
+                if x["k"] == k["k"] and x["a"] == k["a"]:
+                    if kind == "ok":
+                        x["off"], x["cool"], x["why"] = False, 0, ""
+                    elif kind == "limit":
+                        x["off"], x["cool"], x["why"] = False, cf_midnight(), "дневной лимит, до %s" % cf_reset_text()
+                    elif kind == "auth":
+                        x["off"], x["why"] = True, info[:60]
+        keys_res.append((i, k, kind, info))
+        if kind == "ok" and good is None:
+            good = k
+    S.save()
+    models = []
+    if good:
+        for m in CF_IDS:
+            kind, info = cf_probe(good["a"], good["k"], m)
+            if kind in ("paid", "nomodel"):
+                cf_kill(m, (24 if kind == "paid" else 24 * 7) * 3600)
+                models.append((m, "dead", "нужен платный тариф" if kind == "paid" else "снята или не найдена"))
+            elif kind == "ok":
+                with S.lock:
+                    S.d.setdefault("cfdead", {}).pop(m, None)
+                models.append((m, "ok", ""))
+            else:
+                models.append((m, "?", info))
+        S.save()
+        if not any(r[1] == "ok" for r in models) and all(r[1] != "?" for r in models):
+            notify_admins_once("cfnone", "☁️ Ни одна модель Cloudflare из списка не отвечает: все сняты или платные. Игрокам Premium они недоступны. Пришли мне результат /testcf, подберу замену.", every=43200)
+    return keys_res, models
+
+
 def job_testcf(chat):
     try:
-        ks = list(S.d["cf"])
-        lines, good = [], None
-        for i, k in enumerate(ks, 1):
-            kind, info = cf_probe_key(k["a"], k["k"])
-            with S.lock:
-                for x in S.d["cf"]:
-                    if x["k"] == k["k"] and x["a"] == k["a"]:
-                        if kind == "ok":
-                            x["off"], x["cool"], x["why"] = False, 0, ""
-                        elif kind == "limit":
-                            x["off"], x["cool"], x["why"] = False, cf_midnight(), "дневной лимит, до %s" % cf_reset_text()
-                        elif kind == "auth":
-                            x["off"], x["why"] = True, info[:60]
-            if kind == "ok" and good is None:
-                good = k
-            lines.append("%d. %s — %s" % (i, mask(k["k"]), {"ok": "🟢 работает", "limit": "🟡 ключ рабочий, но лимит на сегодня исчерпан", "ratelimit": "🟡 временная пауза"}.get(kind, "🔴 " + info)))
-        S.save()
-        res = []
-        if good:
-            for m in CF_IDS:
-                kind, info = cf_probe(good["a"], good["k"], m)
-                if kind in ("paid", "nomodel"):
-                    CF_DEAD[m] = time.time() + 24 * 3600
-                    res.append("❌ %s — %s" % (mname(m), "нужен платный тариф" if kind == "paid" else "модели нет"))
-                elif kind in ("ok", "limit", "ratelimit"):
-                    CF_DEAD.pop(m, None)
-                    res.append("✅ %s" % mname(m))
-                else:
-                    res.append("⚠️ %s — %s" % (mname(m), info))
-        tg.send(chat, "Проверка Cloudflare:\n" + ("\n".join(lines) or "ключей нет") + ("\n\nМодели:\n" + "\n".join(res) if res else
+        keys_res, models = cf_scan()
+        lines = ["%d. %s — %s" % (i, mask(k["k"]), {"ok": "🟢 работает", "limit": "🟡 ключ рабочий, но лимит на сегодня исчерпан", "ratelimit": "🟡 временная пауза"}.get(kind, "🔴 " + info))
+                 for i, k, kind, info in keys_res]
+        res = [("✅ %s" % mname(m)) if st == "ok" else ("❌ %s — %s" % (mname(m), info)) if st == "dead" else ("❔ %s — не удалось проверить: %s" % (mname(m), info)) for m, st, info in models]
+        tg.send(chat, "Проверка Cloudflare:\n" + ("\n".join(lines) or "ключей нет") + ("\n\nМодели (✅ видят игроки Premium):\n" + "\n".join(res) if res else
                 "\n\nМодели не проверял: нет ни одного рабочего ключа сейчас."))
     except Exception as e:
         log.error("testcf: %s", traceback.format_exc())
         tg.send(chat, "⚠️ Не получилось проверить: %s" % e)
+
+
+def cf_scan_loop():
+    """Раз в 12 часов проверяем, какие модели Cloudflare ещё живы (их регулярно снимают), чтобы игроки не натыкались на ошибки."""
+    time.sleep(45)
+    while True:
+        try:
+            if any(not k["off"] for k in S.d["cf"]):
+                cf_scan()
+        except Exception:
+            log.error("cf_scan_loop: %s", traceback.format_exc())
+        time.sleep(12 * 3600)
 
 
 def cf_admin_cmd(chat, uid, cmd, arg, msg):
@@ -4378,6 +4422,7 @@ def cf_admin_cmd(chat, uid, cmd, arg, msg):
                       "⚠ Держи аккаунт на тарифе Workers Free: у платного тарифа сверх 10 000 нейронов в сутки Cloudflare берёт деньги, а бот этого не видит." % (
                       mask(t), len(S.d["cf"]),
                       {"ok": "🟢 работает", "limit": "🟡 рабочий, но лимит на сегодня уже исчерпан", "ratelimit": "🟡 рабочий"}.get(kind, "🔴 " + info)))
+        FAST.submit(cf_scan)                       # сразу проверяем, какие модели у этого ключа живы
     elif cmd == "delcf":
         with S.lock:
             ks = S.d["cf"]
@@ -4602,6 +4647,7 @@ def main():
         a_, _, t_ = x.partition(":")
         if re.fullmatch(r"[0-9a-fA-F]{32}", a_) and t_:
             cf_add(a_, t_, "из CF_KEYS")
+    threading.Thread(target=cf_scan_loop, daemon=True).start()
     threading.Thread(target=backup_loop, daemon=True).start()
     threading.Thread(target=prem_watch, daemon=True).start()
     if WEBHOOK_BASE:
