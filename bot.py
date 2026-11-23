@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.5-mybuilds"
+BOT_VERSION = "3.5.1-cffix"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -2694,7 +2694,7 @@ HELP = ("👋 Я строю постройки для Minecraft Bedrock с по�
         "🧱 /build <что построить> — например:\n/build средневековый замок с башнями и рвом\n\n"
         "✏️ /edit <что поменять> — доработать последнюю постройку\n"
         "📷 Фото: пришли картинку с подписью /build … — ИИ посмотрит и повторит\n🌐 ИИ сам ищет референсы в интернете; можно вставить ссылку\n"
-        "🤖 /model — выбрать ИИ (4 бесплатные модели; у Premium ещё 7 от Cloudflare)\n"
+        "🤖 /model — выбрать ИИ (4 бесплатные модели; у Premium ещё 6 от Cloudflare)\n"
         "📚 /mybuilds — история твоих построек (5 штук, у Premium 30)\n"
         "⚙️ /settings — настройки: режим «Размышления»\n"
         "🛑 /cancel — остановить текущую\n"
@@ -4128,7 +4128,6 @@ CF_MODELS = [                      # список взят из проекта M
     ("@cf/qwen/qwen2.5-coder-32b-instruct", "Qwen2.5 Coder 32B"),
     ("@cf/qwen/qwq-32b", "QwQ 32B"),
     ("@cf/openai/gpt-oss-20b", "GPT-OSS 20B"),
-    ("@cf/meta/llama-3.1-8b-instruct", "Llama 3.1 8B"),
 ]
 CF_IDS = [m[0] for m in CF_MODELS]
 CF_NAME = dict(CF_MODELS)
@@ -4199,7 +4198,7 @@ def cf_classify(code, body):
         return "auth"
     if code == 403 and ("5035" in b or "workers paid" in b or "upgrade" in b):
         return "paid"
-    if code == 404 or "5007" in b or "no such model" in b:
+    if code in (404, 410) or "5007" in b or "no such model" in b or "deprecated" in b:
         return "nomodel"
     if code == 403:
         return "paid"
@@ -4273,7 +4272,14 @@ def cf_probe(acct, tok, model, timeout=40):
         return "net", "сеть: %s" % str(e)[:80]
 
 
-CF_TEST_MODEL = "@cf/meta/llama-3.1-8b-instruct"        # самая дешёвая по нейронам
+def cf_probe_key(acct, tok):
+    """Проверка ключа: пробуем модели по очереди, пока одна не ответит (отдельные модели Cloudflare иногда снимают с поддержки)."""
+    kind, info = "net", ""
+    for m in CF_IDS:
+        kind, info = cf_probe(acct, tok, m)
+        if kind in ("ok", "limit", "ratelimit", "auth"):
+            break
+    return kind, info
 
 
 def fmt_cf():
@@ -4300,7 +4306,7 @@ def job_testcf(chat):
         ks = list(S.d["cf"])
         lines, good = [], None
         for i, k in enumerate(ks, 1):
-            kind, info = cf_probe(k["a"], k["k"], CF_TEST_MODEL)
+            kind, info = cf_probe_key(k["a"], k["k"])
             with S.lock:
                 for x in S.d["cf"]:
                     if x["k"] == k["k"] and x["a"] == k["a"]:
@@ -4358,7 +4364,7 @@ def cf_admin_cmd(chat, uid, cmd, arg, msg):
             return tg.send(chat, "Это не похоже на API-токен Cloudflare.") or True
         if not cf_add(a, t, note[:40]):
             return tg.send(chat, "Такой ключ уже есть: " + mask(t)) or True
-        kind, info = cf_probe(a, t, CF_TEST_MODEL)
+        kind, info = cf_probe_key(a, t)
         if kind in ("auth", "limit"):
             with S.lock:
                 for x in S.d["cf"]:
