@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.5.2-cfmodels"
+BOT_VERSION = "3.6-rating"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -1671,7 +1671,7 @@ START_TS = time.time()
 def default_state():
     return {"v": 1, "mode": "on", "mode_msg": "", "model": TH_MODEL, "keys": [], "limit": DAILY_LIMIT,
             "banned": [], "users": {}, "builds": {}, "last": {}, "seq": 0, "bk_msg": 0,
-            "cf": [], "cfdead": {}, "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
+            "cf": [], "cfdead": {}, "rate": {}, "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
             "stats": {"builds": 0, "ok": 0, "fail": 0, "worlds": 0, "structs": 0}}
 
 
@@ -2506,8 +2506,10 @@ def clean_text(s):
     return re.sub(r"\s+", " ", s).strip()[:400]
 
 
-def build_markup(bid, prem=False):
+def build_markup(bid, prem=False, rate=None):
     rows = [[{"text": "✅ Беру — пришли мир (.mcworld)", "callback_data": "ok:" + bid}]]
+    if rate is not None:                       # 3.6-rating: 👍/👎 (None = кнопок оценки нет)
+        rows.append(rate_row(bid, rate))
     if prem:
         rows.append([{"text": "🏠 Вид изнутри", "callback_data": "in:" + bid}, {"text": "🗺 Вид сверху", "callback_data": "td:" + bid}])
         rows.append([{"text": "🔎 ×2", "callback_data": "zm:%s:2" % bid}, {"text": "🔎 ×3", "callback_data": "zm:%s:3" % bid},
@@ -2896,6 +2898,7 @@ ADMIN_HELP = (
     "/requests — заявки на проверке (приходят и сами, с кнопками «Выдать»)\n"
     "/prices · /setprice <код> <звёзды> · /setpremlimit <число> — цены и лимит Premium\n\n"
     "Прочее:\n"
+    "/topmodels — рейтинг ИИ-моделей по 👍/👎 игроков\n"
     "/stats — статистика · /status — состояние · /backup — копия состояния · /id — твой ID")
 
 
@@ -3529,7 +3532,7 @@ def send_previews(chat, r, cap, bid, prem, png=None):
             tg.photo(chat, render_topdown(r), "🗺 Вид сверху · %d×%d блоков" % (r.d[0], r.d[2]))
         except Exception as e:
             log.warning("topdown: %s", e)
-    tg.photo(chat, png or render_preview_any(r), cap, build_markup(bid, prem))
+    tg.photo(chat, png or render_preview_any(r), cap, build_markup(bid, prem, rate_show(bid)))
 
 
 def job_view(chat, uid, bid, kind, k=1):
@@ -4442,6 +4445,119 @@ def cf_lock_text(uid):
     return ("🔒 Модели Cloudflare (GPT-OSS 120B, Llama 3.3 70B, Qwen и другие) — только для Premium.\n\n" + premium_text(uid))
 
 
+# ===RATING-BLOCK===
+# ═════════════════════════════════════════════════════════════════════════════
+#  11e. 👍/👎 под постройкой и рейтинг моделей /topmodels
+# ═════════════════════════════════════════════════════════════════════════════
+RATE_PUBLIC = _env("TOPMODELS_PUBLIC", "0") == "1"                  # 1 = /topmodels доступна всем, по умолчанию только админу
+RATE_CMDS = ("topmodels", "topmodel", "modelrating", "modelstop")
+RATE_FEW = 5                                                        # меньше стольких оценок у лидера = рейтинг ориентировочный
+
+
+def rate_name(m):
+    return CF_NAME.get(m) or MODEL_NAME.get(m) or str(m).replace("@cf/", "")
+
+
+def rate_row(bid, vote=0):
+    return [{"text": ("✅ 👍 Нравится" if vote == 1 else "👍 Нравится"), "callback_data": "lk:%s:u" % bid},
+            {"text": ("✅ 👎 Не нравится" if vote == -1 else "👎 Не нравится"), "callback_data": "lk:%s:d" % bid}]
+
+
+def rate_show(bid):
+    # None = кнопок оценки нет (увеличенная копия: это та же постройка, она уже оценена); иначе текущая оценка 1 / -1 / 0
+    b = S.d["builds"].get(bid)
+    if not b or int(b.get("zoom") or 1) > 1:
+        return None
+    return int(b.get("v") or 0)
+
+
+def wilson(up, down):
+    # нижняя граница доверительного интервала доли лайков: мало оценок = осторожная оценка
+    n = up + down
+    if n <= 0:
+        return 0.0
+    z = 1.96
+    p = up / n
+    return (p + z * z / (2 * n) - z * ((p * (1 - p) + z * z / (4 * n)) / n) ** 0.5) / (1 + z * z / n)
+
+
+def rate_apply(bid, uid, want):
+    # возвращает (код, новая оценка): код ok | none | other
+    with S.lock:
+        b = S.d["builds"].get(bid)
+        if not b:
+            return "none", 0
+        if b.get("uid") != uid:
+            return "other", 0
+        old = int(b.get("v") or 0)
+        new = 0 if old == want else want
+        mdl = b.get("mdl")
+        if mdl:
+            r = S.d.setdefault("rate", {}).setdefault(mdl, [0, 0])
+            if old == 1:
+                r[0] = max(0, r[0] - 1)
+            elif old == -1:
+                r[1] = max(0, r[1] - 1)
+            if new == 1:
+                r[0] += 1
+            elif new == -1:
+                r[1] += 1
+        if new:
+            b["v"] = new
+        else:
+            b.pop("v", None)
+    S.save()
+    return "ok", new
+
+
+def on_callback_rate(cq, data):
+    uid, chat, mid = cq["from"]["id"], cq["message"]["chat"]["id"], cq["message"]["message_id"]
+    parts = data.split(":")
+    if len(parts) < 3 or parts[2] not in ("u", "d"):
+        return _ans(cq)
+    bid = parts[1]
+    code, new = rate_apply(bid, uid, 1 if parts[2] == "u" else -1)
+    if code == "none":
+        return _ans(cq, "Эта постройка уже недоступна. Сделай новую: /build", True)
+    if code == "other":
+        return _ans(cq, "Оценить может только автор постройки.", True)
+    _ans(cq, {1: "👍 Записал: нравится", -1: "👎 Записал: не нравится", 0: "Оценка снята"}[new])
+    try:
+        tg.call("editMessageReplyMarkup", {"chat_id": chat, "message_id": mid, "reply_markup": build_markup(bid, is_prem(uid), new)}, tries=1)
+    except Exception as e:
+        log.info("rate markup: %s", e)
+
+
+def topmodels_text():
+    with S.lock:
+        rows = []
+        for m, v in (S.d.get("rate") or {}).items():
+            if isinstance(v, list) and len(v) == 2 and int(v[0]) + int(v[1]) > 0:
+                rows.append((m, int(v[0]), int(v[1])))
+    if not rows:
+        return ("🏆 Рейтинг моделей пока пуст.\n\nПод каждой постройкой есть кнопки «👍 Нравится» и «👎 Не нравится». "
+                "Когда игроки начнут их нажимать, здесь появится топ.")
+    rows.sort(key=lambda r: (wilson(r[1], r[2]), r[1] + r[2]), reverse=True)
+    medals = ["🥇", "🥈", "🥉"]
+    t = ["🏆 Рейтинг ИИ-моделей по оценкам игроков", ""]
+    for i, (m, u, d) in enumerate(rows, 1):
+        n = u + d
+        t.append("%s %s\n     👍 %d · 👎 %d · %d%% нравится · оценок: %d" % (medals[i - 1] if i <= 3 else "%d." % i, rate_name(m), u, d, round(100.0 * u / n), n))
+    best = rows[0]
+    t.append("")
+    t.append("🥇 Лучше всех строит: %s" % rate_name(best[0]))
+    if best[1] + best[2] < RATE_FEW:
+        t.append("⚠ Оценок у лидера пока мало, рейтинг ориентировочный.")
+    t.append("Порядок учитывает число оценок: одна оценка 👍 весит меньше, чем 30 👍 при 10 👎.")
+    return "\n".join(t)
+
+
+def cmd_topmodels(chat, uid):
+    if not (is_admin(uid) or RATE_PUBLIC):
+        return tg.send(chat, "🔒 Рейтинг моделей доступен только админу.")
+    return tg.send(chat, topmodels_text())
+
+
 def on_message(msg):
     u, chat = msg.get("from"), msg["chat"]
     if not u or u.get("is_bot"):
@@ -4485,6 +4601,8 @@ def on_message(msg):
             return (cmd_build if cmd == "build" else cmd_edit)(cid, uid, arg, msg.get("message_id"))
         finally:
             EXTRA.pop(uid, None)
+    if cmd in RATE_CMDS:
+        return cmd_topmodels(cid, uid)
     if cmd == "me":
         return cmd_me(cid, uid)
     if cmd in MB_CMDS:
@@ -4522,6 +4640,8 @@ def on_callback(cq):
         return on_callback_broadcast(cq, data)
     if cq["from"]["id"] in S.d["banned"] and not is_admin(cq["from"]["id"]):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
+    if data.startswith("lk:"):
+        return on_callback_rate(cq, data)
     if data.startswith("fr:"):
         return on_callback_free(cq, data)
     if premium_callback(cq, data):
