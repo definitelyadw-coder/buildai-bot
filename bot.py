@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.6-rating"
+BOT_VERSION = "3.6.1-fallback"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
@@ -474,6 +474,61 @@ def run_spec(spec, prem=False):
     return SimpleNamespace(ops=ops, pal=pal, g=g, d=(X, Y, Z), n=int(np.count_nonzero(g)), unk=sorted(unk), bad=bad)
 
 
+# ===LOOSEJSON-BLOCK===
+def _json_repair(s):
+    # чинит типичные огрехи моделей: комментарии, лишние запятые, True/False/None (строки внутри кавычек не трогает)
+    out, i, n, instr, esc = [], 0, len(s), False, False
+    while i < n:
+        ch = s[i]
+        if instr:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+            i += 1
+            continue
+        if ch == '"':
+            instr = True
+            out.append(ch)
+            i += 1
+        elif s.startswith("//", i):
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+        elif s.startswith("/*", i):
+            j = s.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif ch == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":
+                i += 1                                   # лишняя запятая перед закрывающей скобкой
+            else:
+                out.append(ch)
+                i += 1
+        elif ch.isalpha():
+            j = i
+            while j < n and (s[j].isalnum() or s[j] == "_"):
+                j += 1
+            w = s[i:j]
+            out.append({"True": "true", "False": "false", "None": "null"}.get(w, w))
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _jl(s):
+    try:
+        return json.loads(s)
+    except Exception:
+        return json.loads(_json_repair(s))
+
+
 def parse_spec(t):
     f = [m.group(1) for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", t)]
     cands = [f[-1]] if f else []
@@ -482,7 +537,7 @@ def parse_spec(t):
         cands.append(t[i:j + 1])
     for s in cands:
         try:
-            v = json.loads(s)
+            v = _jl(s)
             if isinstance(v, dict):
                 return v
         except Exception:
@@ -499,7 +554,7 @@ def salvage_spec(t):
     ops = []
     for m in re.finditer(r"\{[^{}]*\}", b[a:]):
         try:
-            o = json.loads(m.group(0))
+            o = _jl(m.group(0))
             if isinstance(o, dict) and o.get("t") and (o.get("a") or o.get("from") or o.get("at")):
                 ops.append(o)
         except Exception:
@@ -543,7 +598,7 @@ def partial_ops(t):
                 depth -= 1
                 if depth == 0 and start >= 0:
                     try:
-                        o = json.loads(b[start:j + 1])
+                        o = _jl(b[start:j + 1])
                         if isinstance(o, dict) and o.get("t"):
                             ops.append(o)
                     except Exception:
@@ -2441,6 +2496,9 @@ def generate_spec(q, history, on_chunk, cancel, status, model=None, prem=False, 
                 best = sp
     if best:
         return best, True
+    snip = (locals().get("text") or "").strip()
+    notify_admins_once("badjson" + str(model), "🧩 Модель %s вернула ответ, из которого не собрать постройку (%s).\nНачало ответа:\n%s" % (
+        rate_name(model), err, snip[:700] or "(пусто)"), every=600)
     raise LLMError("%s. Попробуй ещё раз." % err, "bad")
 
 
@@ -2625,8 +2683,18 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
         ctx = prepare_ctx(uid, q, history, JOBX.pop(uid, None) or {}, status, cancel)
         pth = threading.Thread(target=pulse, daemon=True, name="pulse")
         pth.start()
+        fb_from = None
         try:
-            spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem, user_think(uid) or bool(ctx.get("imgs")), ctx)
+            try:
+                spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem, user_think(uid) or bool(ctx.get("imgs")), ctx)
+            except LLMError as e0:
+                fb = S.d["model"]
+                if getattr(e0, "kind", "") != "bad" or model == fb or ctx.get("imgs") or cancel.is_set():
+                    raise
+                fb_from, model = model, fb          # 3.6.1: выбранная модель не справилась, повторяем на модели по умолчанию
+                prog["chars"], prog["parts"], prog["ops"] = 0, None, 0
+                status("🔁 %s не справилась с этой постройкой, пробую %s…" % (rate_name(fb_from), rate_name(fb)))
+                spec, part = generate_spec(q, history, on_chunk, cancel, status, model, prem, user_think(uid), ctx)
         finally:
             stop_pulse.set()
             pth.join(timeout=20)
@@ -2636,6 +2704,8 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
         hist = [{"role": "user", "content": q}, {"role": "assistant", "content": json.dumps({"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, ensure_ascii=False)}]
         bid = store_build(uid, q, spec, hist, prem, meta={"n": int(r.n), "dm": [int(v) for v in r.d], "mdl": ctx.get("vmodel") or model})
         cap = "✅ %s\n🧱 %d блоков · %d×%d×%d\n🤖 %s (сменить: /model)" % (spec.get("name") or "Постройка", r.n, *r.d, mname(ctx.get("vmodel") or model))
+        if fb_from:
+            cap += "\n↪️ %s не справилась, построила %s" % (rate_name(fb_from), rate_name(model))
         if max(r.d) > 128:
             cap += "\n🔍 Превью уменьшено, в мире будет полный размер."
         if part:
