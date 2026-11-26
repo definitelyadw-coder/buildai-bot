@@ -3097,8 +3097,8 @@ def cmd_settings(chat, uid):
 
 def on_callback_settings(cq, data):
     uid, chat = cq["from"]["id"], cq["message"]["chat"]["id"]
-    key = "web" if data == "sg:web" else "think"
-    if data in ("sg:think", "sg:web"):
+    key = "web" if data == "sg:web" else "enh" if data == "sg:enh" else "think"
+    if data in ("sg:think", "sg:web", "sg:enh"):
         with S.lock:
             us = S.d["users"].setdefault(str(uid), {"u": "", "n": "", "first": now_ts(), "day": today(), "cnt": 0, "tot": 0})
             us[key] = not us.get(key, True)
