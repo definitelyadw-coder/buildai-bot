@@ -1177,6 +1177,146 @@ _FT_BASE = {   # блок -> (низ-имя текстур, есть ли отд
     "stonecutter_block": ("stonecut", False), "pumpkin": ("pumpkin", False), "lit_pumpkin": ("lit_pumpkin", True),
     "melon_block": ("melon", False), "bed": ("bed", False),
 }
+# ===REALTEX-BLOCK===
+# ─── 4b. Настоящие текстуры Bedrock для предпросмотра. Берутся из официального репозитория Mojang/bedrock-samples при старте бота.
+#     Если репозиторий недоступен или файла нет, блок рисуется цветом, как раньше. Переменные: TEXTURES=0 (выключить), TEXTURE_REF (версия/ветка через запятую).
+TEX_ON = _env("TEXTURES", "1") != "0"
+TEX_REFS = [x for x in re.split(r"[,\s]+", _env("TEXTURE_REF", "v1.21.50.7,main")) if x]     # пробуем по порядку: тег 1.21.50, затем ветка main
+TEX_RAW = "https://raw.githubusercontent.com/Mojang/bedrock-samples/%s/resource_pack/textures/blocks/%s.png"
+TEX_STORE = {}                       # имя файла (без .png) -> Image RGBA или None, если такого файла нет
+TEX_STATE = {"ref": None, "loaded": 0, "total": 0}
+_TEX_FIXED = {                       # блок -> (боковая грань: кандидаты файлов, верхняя грань или None)
+    "stone": (["stone"], None), "cobblestone": (["cobblestone"], None), "mossy_cobblestone": (["cobblestone_mossy"], None),
+    "stone_bricks": (["stonebrick"], None), "mossy_stone_bricks": (["stonebrick_mossy"], None), "cracked_stone_bricks": (["stonebrick_cracked"], None),
+    "smooth_stone": (["stone_slab_top"], None), "andesite": (["stone_andesite"], None), "diorite": (["stone_diorite"], None), "granite": (["stone_granite"], None),
+    "deepslate": (["deepslate/deepslate"], ["deepslate/deepslate_top"]), "deepslate_bricks": (["deepslate/deepslate_bricks"], None),
+    "polished_deepslate": (["deepslate/polished_deepslate"], None), "tuff": (["tuff"], None), "bricks": (["brick"], None), "mud_bricks": (["mud_bricks"], None),
+    "sandstone": (["sandstone_normal"], ["sandstone_top"]), "smooth_sandstone": (["sandstone_smooth", "sandstone_top"], None),
+    "cream_concrete": (["sandstone_smooth", "sandstone_top"], None), "red_sandstone": (["red_sandstone_normal"], ["red_sandstone_top"]),
+    "sand": (["sand"], None), "gravel": (["gravel"], None), "dirt": (["dirt"], None), "snow": (["snow"], None),
+    "grass_block": (["grass_side_carried", "grass_side"], ["grass_top"]),
+    "oak_planks": (["planks_oak"], None), "spruce_planks": (["planks_spruce"], None), "birch_planks": (["planks_birch"], None),
+    "dark_oak_planks": (["planks_big_oak"], None), "acacia_planks": (["planks_acacia"], None), "bamboo_planks": (["bamboo_planks"], None),
+    "crimson_planks": (["crimson_planks"], None),
+    "oak_log": (["log_oak"], ["log_oak_top"]), "spruce_log": (["log_spruce"], ["log_spruce_top"]), "birch_log": (["log_birch"], ["log_birch_top"]),
+    "dark_oak_log": (["log_big_oak"], ["log_big_oak_top"]),
+    "oak_leaves": (["leaves_oak"], None), "spruce_leaves": (["leaves_spruce"], None), "birch_leaves": (["leaves_birch"], None),
+    "jungle_leaves": (["leaves_jungle"], None), "acacia_leaves": (["leaves_acacia"], None), "dark_oak_leaves": (["leaves_big_oak"], None),
+    "mangrove_leaves": (["mangrove_leaves"], None), "cherry_leaves": (["cherry_leaves"], None), "azalea_leaves": (["azalea_leaves"], None),
+    "flowering_azalea_leaves": (["azalea_leaves_flowers"], None),
+    "terracotta": (["hardened_clay"], None), "glowstone": (["glowstone"], None), "sea_lantern": (["sea_lantern"], None),
+    "lava": (["lava_placeholder", "lava_still"], None), "quartz_block": (["quartz_block_side"], ["quartz_block_top"]),
+    "obsidian": (["obsidian"], None), "netherrack": (["netherrack"], None), "nether_bricks": (["nether_bricks", "nether_brick"], None),
+    "iron_block": (["iron_block"], None), "gold_block": (["gold_block"], None), "diamond_block": (["diamond_block"], None),
+    "emerald_block": (["emerald_block"], None), "coal_block": (["coal_block"], None), "hay_block": (["hay_block_side"], ["hay_block_top"]),
+    "copper_block": (["copper_block"], None), "prismarine_bricks": (["prismarine_bricks"], None),
+}
+
+
+def tex_cands(name):
+    """Имя блока из палитры -> (кандидаты файлов боковой грани, кандидаты верхней или None) либо None, если текстуры нет."""
+    if name in _TEX_FIXED:
+        return _TEX_FIXED[name]
+    for suf, pre in (("_concrete", "concrete_"), ("_wool", "wool_colored_"), ("_terracotta", "hardened_clay_stained_")):
+        if name.endswith(suf) and len(name) > len(suf):
+            c = name[:-len(suf)]
+            return ([pre + c] + ([pre + "silver"] if c == "light_gray" else []), None)
+    return None
+
+
+def _tex_pick(cl):
+    for fn in cl or []:
+        if TEX_STORE.get(fn) is not None:
+            return fn
+    return None
+
+
+def _tex_fetch(ref, fn):
+    r = requests.get(TEX_RAW % (ref, fn), timeout=15)
+    if r.status_code != 200:
+        return None
+    im = Image.open(io.BytesIO(r.content)).convert("RGBA")
+    w, h = im.size
+    if h > w:                                       # анимированная лента (лава и т.п.): берём первый кадр
+        im = im.crop((0, 0, w, w))
+    if im.size[0] > 64:
+        im = im.resize((64, 64), _RS.NEAREST)
+    return im
+
+
+def tex_preload():
+    """Фоновая загрузка всех нужных текстур при старте. Пока не загрузились, предпросмотр рисуется цветами."""
+    if not TEX_ON:
+        return
+    try:
+        ref = None
+        for rf in TEX_REFS:
+            try:
+                if requests.get(TEX_RAW % (rf, "stone"), timeout=15).status_code == 200:
+                    ref = rf
+                    break
+            except requests.RequestException:
+                continue
+        if not ref:
+            log.warning("текстуры: репозиторий Mojang недоступен, предпросмотр остаётся цветным")
+            return
+        names = set()
+        for b in list(D.keys()):
+            c = tex_cands(b)
+            if c:
+                names.update(c[0])
+                names.update(c[1] or [])
+        for c in ("concrete", "wool_colored", "hardened_clay_stained"):
+            pass
+
+        def one(fn):
+            try:
+                TEX_STORE[fn] = _tex_fetch(ref, fn)
+            except Exception:
+                TEX_STORE[fn] = None
+
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="tex") as ex:
+            list(ex.map(one, sorted(names)))
+        ok = sum(1 for v in TEX_STORE.values() if v is not None)
+        TEX_STATE.update(ref=ref, loaded=ok, total=len(TEX_STORE))
+        miss = sorted(k for k, v in TEX_STORE.items() if v is None)
+        log.info("текстуры: версия %s, загружено %d из %d", ref, ok, len(TEX_STORE))
+        notify_admins_once("textures", "🎨 Текстуры Bedrock: версия %s, загружено %d из %d файлов.%s" % (
+            ref, ok, len(TEX_STORE), ("\nНе нашлись (рисуются цветом): " + ", ".join(miss[:25])) if miss else ""), every=21600)
+    except Exception:
+        log.error("tex_preload: %s", traceback.format_exc())
+
+
+def _real_desc(b):
+    """Описание отрисовки обычного блока настоящей текстурой или None (тогда рисуется цветом)."""
+    if not TEX_ON or not TEX_STATE["loaded"] or b not in D or D[b][2] in ("g", "t"):
+        return None
+    c = tex_cands(b)
+    if not c:
+        return None
+    side = _tex_pick(c[0])
+    if side is None:
+        return None
+    top = _tex_pick(c[1]) if c[1] else None
+    return {"hf": 1.0, "fvec": None, "top": "rt:%s:t:%s" % (b, top or side), "side": "rt:%s:s:%s" % (b, side),
+            "front": None, "otop": None, "emis": D[b][2] == "e", "real": True}
+
+
+def _real_tile(key):
+    _, b, face, fn = key.split(":", 3)
+    im = TEX_STORE.get(fn)
+    if im is None:
+        raise KeyError(key)
+    a = np.asarray(im, dtype=np.float32)
+    rgb = a[..., :3]
+    if float(np.abs(rgb[..., 0] - rgb[..., 1]).mean() + np.abs(rgb[..., 1] - rgb[..., 2]).mean()) < 14:     # серая текстура (трава, листва): красим цветом блока
+        base = D[b][1] if (face == "t" and D[b][1]) else D[b][0]
+        m = rgb.mean(axis=2, keepdims=True)
+        rgb = np.clip(m / max(float(m.mean()), 1.0) * np.array(base, dtype=np.float32), 0, 255)
+    out = np.dstack([rgb, np.full(rgb.shape[:2], 255.0, dtype=np.float32)])
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 _FT_CACHE = {}
 _TR = getattr(Image, "Transpose", Image)
 _TF = getattr(Image, "Transform", Image)
