@@ -4659,6 +4659,119 @@ def cmd_topmodels(chat, uid):
     return tg.send(chat, topmodels_text())
 
 
+# ===PUBLISH-BLOCK===
+# ═════════════════════════════════════════════════════════════════════════════
+#  11f. Профиль в /me (ранг, статистика) и публикация построек в канал игроков
+# ═════════════════════════════════════════════════════════════════════════════
+RANKS = [(0, "🌱 Новичок"), (5, "🧱 Строитель"), (20, "⚒️ Мастер"), (50, "🏛 Архитектор"), (100, "👑 Легенда")]   # порог числа построек, название
+
+
+def rank_of(n):
+    """-> (текущий ранг, следующий ранг или None)"""
+    cur, nxt = RANKS[0], None
+    for i, rk in enumerate(RANKS):
+        if n >= rk[0]:
+            cur = rk
+            nxt = RANKS[i + 1] if i + 1 < len(RANKS) else None
+    return cur, nxt
+
+
+def display_name(uid):
+    us = S.d["users"].get(str(uid)) or {}
+    return clean_text(us.get("n") or "") or (("@" + us["u"]) if us.get("u") else "Игрок")
+
+
+def profile_text(uid):
+    us = S.d["users"].get(str(uid)) or {}
+    tot = int(us.get("tot", 0) or 0)
+    cur, nxt = rank_of(tot)
+    t = "👤 %s%s\n🏅 Ранг: %s" % (display_name(uid), " 👑" if is_prem(uid) else "", cur[1])
+    if nxt:
+        t += " (до «%s» ещё %d)" % (nxt[1], nxt[0] - tot)
+    t += "\n🧱 Построек: %d\n📢 Опубликовано в канале: %d\n👥 Друзей приглашено: %d" % (tot, int(us.get("pubs", 0) or 0), ref_count(uid))
+    return t
+
+
+def pub_left(uid):
+    if not PUB_DAILY:
+        return 999
+    us = S.d["users"].get(str(uid)) or {}
+    used = int(us.get("pubcnt", 0) or 0) if us.get("pubday") == today() else 0
+    return max(0, PUB_DAILY - used)
+
+
+def pub_caption(b, uid, r):
+    us = S.d["users"].get(str(uid)) or {}
+    au = display_name(uid) + ((" (@%s)" % us["u"]) if us.get("u") else "")
+    cur, _ = rank_of(int(us.get("tot", 0) or 0))
+    cap = "🏗 %s\n💬 «%s»\n🧱 %s блоков · %d×%d×%d\n👤 %s · %s\n🤖 %s" % (
+        mb_name(b), clean_text(b.get("q"))[:150], fmt_int(r.n), *r.d, au, cur[1], mname(b.get("mdl") or user_model(uid)))
+    if BOT_USERNAME:
+        cap += "\n\n✨ Построй своё: @" + BOT_USERNAME
+    return cap[:1000]
+
+
+def on_callback_publish(cq, data):
+    uid, chat = cq["from"]["id"], cq["message"]["chat"]["id"]
+    bid = data.partition(":")[2]
+    b = S.d["builds"].get(bid)
+    if not USERS_CHANNEL:
+        return _ans(cq, "Публикация сейчас отключена.", True)
+    if not b:
+        return _ans(cq, "Эта постройка уже недоступна. Сделай новую: /build", True)
+    if b.get("uid") != uid:
+        return _ans(cq, "Опубликовать может только автор постройки.", True)
+    if b.get("pub"):
+        return _ans(cq, "Эта постройка уже в канале @%s ✅" % USERS_CHANNEL, True)
+    if not pub_left(uid):
+        return _ans(cq, "На сегодня лимит публикаций исчерпан (%d). Завтра можно снова." % PUB_DAILY, True)
+    kk = (uid, bid, "pb", 1)
+    if time.time() - ACTIVE_FILES.get(kk, 0) < 10:
+        return _ans(cq, "Уже публикую…")
+    ACTIVE_FILES[kk] = time.time()
+    _ans(cq, "Публикую…")
+    FAST.submit(job_publish, chat, uid, bid)
+
+
+def job_publish(chat, uid, bid):
+    with S.lock:
+        b = S.d["builds"].get(bid)
+        if not b or b.get("pub"):
+            return
+        b["pub"] = now_ts()                       # занимаем сразу, чтобы двойное нажатие не опубликовало дважды
+    err = None
+    try:
+        with VIEW_SEM:
+            r = run_spec_for_build(b)
+            png = render_preview_any(r)
+        tg.photo("@" + USERS_CHANNEL, png, pub_caption(b, uid, r))
+    except Exception as e:
+        err = e
+        log.error("job_publish: %s", traceback.format_exc())
+    if err is None:
+        with S.lock:
+            us = S.d["users"].get(str(uid))
+            if us is not None:
+                us["pubs"] = int(us.get("pubs", 0) or 0) + 1
+                if us.get("pubday") != today():
+                    us["pubday"], us["pubcnt"] = today(), 0
+                us["pubcnt"] = int(us.get("pubcnt", 0) or 0) + 1
+        S.save()
+        try:
+            tg.send(chat, "📢 Опубликовано в канале @%s!\nhttps://t.me/%s" % (USERS_CHANNEL, USERS_CHANNEL))
+        except Exception:
+            pass
+        return
+    with S.lock:
+        b.pop("pub", None)
+    S.save()
+    try:
+        tg.send(chat, "⚠️ Не получилось опубликовать, попробуй позже.")
+    except Exception:
+        pass
+    notify_admins_once("pubfail", "⚠️ Не могу публиковать в @%s: %s\nБот должен быть администратором канала с правом публикации сообщений." % (USERS_CHANNEL, str(err)[:200]), every=1800)
+
+
 def on_message(msg):
     u, chat = msg.get("from"), msg["chat"]
     if not u or u.get("is_bot"):
