@@ -442,6 +442,65 @@ def expand(lst, off=None, depth=0, budget=None, cap=30000):
     return out, bad
 
 
+# ===FIXWINDOWS-BLOCK===
+def _sh(a, axis, d, fill):
+    """out[i] = a[i + d] по оси axis; за краем массива подставляется fill."""
+    n = a.shape[axis]
+    if d == 0:
+        return a.copy()
+    out = np.full(a.shape, fill, dtype=bool)
+    if abs(d) >= n:
+        return out
+    so, si = [slice(None)] * 3, [slice(None)] * 3
+    if d > 0:
+        so[axis], si[axis] = slice(0, n - d), slice(d, n)
+    else:
+        so[axis], si[axis] = slice(-d, n), slice(0, n + d)
+    out[tuple(so)] = a[tuple(si)]
+    return out
+
+
+def fix_windows(T, pal, pi):
+    """Модели часто ставят стекло в толстую стену, а за ним оставляют слой стены («стена внутри окна»).
+    Если у стекла с одной стороны воздух, а с другой сплошная стена толщиной до 3 блоков, за которой снова воздух,
+    эти блоки стены тоже становятся стеклом: окно прозрачное насквозь. Работает только по горизонтали, вертикальные стёкла (крыши) не трогает.
+    Возвращает, сколько блоков исправлено."""
+    gi = pi.get("glass")
+    if gi is None:
+        return 0
+    idx = np.argwhere(T == gi)
+    if len(idx) == 0:
+        return 0
+    lo = np.maximum(idx.min(axis=0) - 4, 0)
+    hi = idx.max(axis=0) + 5
+    sub = T[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    if sub.size > 6000000:
+        return 0
+    solid_ids = [i for i, n in enumerate(pal) if i and i != gi and n in D and D[n][2] not in ("g", "t")]
+    op = np.isin(sub, solid_ids)
+    air = sub == 0
+    gl = sub == gi
+    solid = op | gl
+    side = _sh(solid, 1, 1, False) & _sh(solid, 1, -1, False)
+    conv = np.zeros(sub.shape, dtype=bool)
+    for A in (0, 2):
+        sb = side & _sh(solid, 2 - A, 1, False) & _sh(solid, 2 - A, -1, False)
+        for d in (1, -1):
+            run = gl & _sh(air, A, -d, True) & sb              # стекло: спереди воздух, по бокам сверху и снизу блоки
+            done = np.zeros(sub.shape, dtype=bool)
+            for k in range(1, 4):
+                run = run & _sh(op, A, d * k, False)           # k-й блок позади стекла сплошной
+                end = run & _sh(air, A, d * (k + 1), False) & ~done      # а за ним снова воздух: это слой стены, который закрывает окно
+                if end.any():
+                    for j in range(1, k + 1):
+                        conv |= _sh(end, A, -j * d, False)
+                    done |= end
+    n = int(conv.sum())
+    if n:
+        sub[conv] = gi
+    return n
+
+
 def run_spec(spec, prem=False):
     """Превращает JSON ИИ в сетку блоков. Результат: ops, pal, g[x,y,z], d=(X,Y,Z), n, unk, bad."""
     if not isinstance(spec, dict):
