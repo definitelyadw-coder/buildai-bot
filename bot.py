@@ -2586,6 +2586,14 @@ def prepare_ctx(uid, q, history, jx, status, cancel):
             ctx["refs"], ctx["src"] = web_refs(q)
         except Exception as e:
             log.warning("референсы: %s", e)
+    if ENH_ON and not history and not ctx["imgs"] and len(q) <= ENH_MAXLEN and user_enh(uid):
+        status("✨ Улучшаю запрос…")
+        try:
+            ctx["plan"] = enhance_prompt(q, cancel)
+        except Cancelled:
+            raise
+        except Exception as e:
+            log.warning("улучшение запроса не вышло, строю по исходному: %s", e)
     if cancel.is_set():
         raise Cancelled()
     return ctx
