@@ -35,6 +35,8 @@ TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
 BOT_VERSION = "3.6.2-wool"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
+USERS_CHANNEL = _env("USERS_CHANNEL", "Usersbuildai").replace("https://t.me/", "").lstrip("@").strip("/")   # канал, куда игроки публикуют постройки
+PUB_DAILY = int(_env("PUB_DAILY", "5"))                   # сколько публикаций в канал в сутки на человека (0 = без лимита)
 TASK_BONUS = int(_env("TASK_BONUS", "2"))                 # награда за подписку
 REF_BONUS = int(_env("REF_BONUS", "1"))                   # награда за одного приглашённого
 REF_MAX = int(_env("REF_MAX", "0"))                       # сколько приглашённых засчитывать максимум (0 = без потолка)
