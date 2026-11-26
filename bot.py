@@ -3087,7 +3087,8 @@ def settings_text(uid):
 
 def settings_markup(uid):
     return {"inline_keyboard": [[{"text": "🧠 Отключить размышления" if user_think(uid) else "🧠 Включить размышления", "callback_data": "sg:think"}],
-                                [{"text": "🌐 Отключить интернет" if web_on(uid) else "🌐 Включить интернет", "callback_data": "sg:web"}]]}
+                                [{"text": "🌐 Отключить интернет" if web_on(uid) else "🌐 Включить интернет", "callback_data": "sg:web"}],
+                                [{"text": "✨ Отключить улучшение запроса" if user_enh(uid) else "✨ Включить улучшение запроса", "callback_data": "sg:enh"}]]}
 
 
 def cmd_settings(chat, uid):
