@@ -2639,6 +2639,8 @@ def web_note(ctx):
         n.append("⚠ Фото не удалось прочитать, строил по тексту.")
     elif ctx["imgs"]:
         n.append("🖼 Фото учтено." + ((" Строила модель со зрением: " + mname(ctx["vmodel"])) if ctx.get("vmodel") else ""))
+    if ctx.get("plan"):
+        n.append("✨ Запрос улучшен. План для ИИ:\n" + ctx["plan"][:700] + ("…" if len(ctx["plan"]) > 700 else ""))
     if ctx["src"]:
         n.append("🌐 Референсы: " + ", ".join(ctx["src"]))
     return "\n".join(n)
