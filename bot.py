@@ -2531,6 +2531,50 @@ def web_refs(q):
     return "\n".join(parts)[:4000], src
 
 
+# ===ENHANCE-BLOCK===
+# ─── Авто-улучшение запроса: короткое «дом» -> подробный архитектурный план (размеры, материалы, крыша, интерьер) -> этот план получает строящий ИИ.
+ENH_ON = _env("ENHANCE", "1") != "0"                       # админский выключатель всей функции
+ENH_MODEL = _env("ENHANCE_MODEL", MODEL_IDS[0])            # быстрая модель-улучшатель (по умолчанию DeepSeek V4 Flash); если занята, пробуем следующие
+ENH_TIMEOUT = int(_env("ENHANCE_TIMEOUT", "60"))           # сколько ждём улучшение, сек (не вышло: строим по исходному запросу)
+ENH_MAXLEN = int(_env("ENHANCE_MAXLEN", "220"))            # запросы длиннее этого уже подробные, их не трогаем
+ENH_SYS = ("You are a senior Minecraft architect who writes build briefs for another AI builder. The builder works in Minecraft Bedrock 1.21.50 with FULL BLOCKS only "
+           "(no stairs, slabs or doors) using fill, hollow, cylinder, sphere, line, mirror and repeat operations; at most 128 blocks per axis, 1 block = 1 metre. "
+           "Turn the player's short request into ONE clear design brief:\n"
+           "1) What it is, its style and overall silhouette, and an exact size in blocks (width x depth x height). Choose realistic sizes: a house about 15-25 wide and 8-14 tall with the roof, "
+           "a tower 7-11 wide, a castle 50-80 wide.\n"
+           "2) Materials: 3-5 blocks for walls, floor, roof, trim, windows and lights. Use ONLY block names from this list: " + ", ".join(D.keys()) + ".\n"
+           "3) Structure from bottom to top: foundation, walls, corner pillars, the roof shape and its height layers, windows (how many and where), the door opening, chimney or towers.\n"
+           "4) Interior: rooms with their purpose and the furniture in each (chest, bed, furnace, crafting_table, bookshelf and so on), lighting.\n"
+           "5) Outside details: garden, fence, path, lamps, trees.\n"
+           "Keep everything the player asked for (style, colours, size, features) and add only what fits it. If the request is a creature, vehicle or object, describe its recognizable "
+           "silhouette part by part with dimensions instead of rooms. Answer in English, plain text, numbered points, at most 220 words, no markdown, no JSON, no preamble.")
+
+
+def user_enh(uid):
+    return bool((S.d["users"].get(str(uid)) or {}).get("enh", True))
+
+
+def enhance_prompt(q, cancel):
+    """Короткий запрос -> подробный план от модели-улучшателя. Бросает LLMError, если ни одна модель не ответила."""
+    msgs = [{"role": "system", "content": ENH_SYS}, {"role": "user", "content": q}]
+    order = [ENH_MODEL] + [m for m in MODEL_IDS if m != ENH_MODEL]
+    last = None
+    for m in order[:3]:
+        try:
+            txt = llm_complete(msgs, lambda n, parts=None: None, cancel, m, time.time() + ENH_TIMEOUT, True)
+        except LLMError as e:
+            last = e
+            if e.kind in ("model", "timeout", "bad"):
+                continue
+            break
+        txt = re.sub(r"[ \t]+", " ", (txt or "").replace("```", "")).strip()
+        if len(txt) >= 40:
+            return txt[:1800]
+    if last:
+        raise last
+    return ""
+
+
 def prepare_ctx(uid, q, history, jx, status, cancel):
     ctx = {"imgs": [], "refs": "", "src": [], "want_img": bool(jx.get("imgs"))}
     if ctx["want_img"]:
