@@ -1266,8 +1266,7 @@ def tex_preload():
             if c:
                 names.update(c[0])
                 names.update(c[1] or [])
-        for c in ("concrete", "wool_colored", "hardened_clay_stained"):
-            pass
+        names = sorted(names)
 
         def one(fn):
             try:
