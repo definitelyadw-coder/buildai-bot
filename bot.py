@@ -3103,7 +3103,7 @@ def on_callback_settings(cq, data):
             us = S.d["users"].setdefault(str(uid), {"u": "", "n": "", "first": now_ts(), "day": today(), "cnt": 0, "tot": 0})
             us[key] = not us.get(key, True)
         S.save()
-    ans = ("Интернет: " + ("включён" if web_on(uid) else "выключен")) if key == "web" else "Размышления: " + ("включены" if user_think(uid) else "выключены")
+    ans = ("Интернет: " + ("включён" if web_on(uid) else "выключен")) if key == "web" else ("Улучшение запроса: " + ("включено" if user_enh(uid) else "выключено")) if key == "enh" else "Размышления: " + ("включены" if user_think(uid) else "выключены")
     tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": ans})
     tg.safe_edit(chat, cq["message"]["message_id"], settings_text(uid), settings_markup(uid))
 
