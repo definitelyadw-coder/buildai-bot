@@ -5125,6 +5125,7 @@ def main():
         a_, _, t_ = x.partition(":")
         if re.fullmatch(r"[0-9a-fA-F]{32}", a_) and t_:
             cf_add(a_, t_, "из CF_KEYS")
+    threading.Thread(target=tex_preload, daemon=True, name="tex-preload").start()
     threading.Thread(target=cf_scan_loop, daemon=True).start()
     threading.Thread(target=backup_loop, daemon=True).start()
     threading.Thread(target=prem_watch, daemon=True).start()
