@@ -1334,7 +1334,7 @@ def _ftex(name):
     t = _FT_CACHE.get(name)
     if t is None:
         try:
-            t = _FT_BUILD[name]()
+            t = _real_tile(name) if name.startswith("rt:") else _FT_BUILD[name]()
         except Exception:
             t = _im((200, 0, 200))
         _FT_CACHE[name] = t
