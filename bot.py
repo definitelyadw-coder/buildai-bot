@@ -1435,6 +1435,8 @@ def _iso_view(g, pal, k, W, H, ss, fk=None):
     m = 2                                            # поля земли вокруг
     s = min((W * 0.94) / ((X + Z + 2 * m) * 0.8660254), (H * 0.94) / ((X + Z + 2 * m) * 0.5 + Y))
     s = max(2.0, min(s, 60.0 * ss))
+    if s < 7 * ss:                                   # блоки слишком мелкие: текстура только рябит, оставляем цвет
+        fdesc = [None if (dd is not None and dd.get("real")) else dd for dd in fdesc]
     w, h = 0.8660254 * s, 0.5 * s
     cx = (X - Z) * w / 2
     sy_min, sy_max = -2 * m * h - Y * s, (X + Z + 2 * m) * h
