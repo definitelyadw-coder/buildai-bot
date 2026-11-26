@@ -2920,7 +2920,7 @@ def cmd_me(chat, uid):
         pr = "⭐ Premium нет. Карты до 384×384, вид изнутри и сверху, %d построек в день → /premium" % S.d["prem_limit"]
     if bonus_of(uid):
         t += "\n🎁 Бонусных запросов: %d (тратятся после дневного лимита)" % bonus_of(uid)
-    tg.send(chat, "%s\n%s\nСервис: %s\nИИ: %s (сменить: /model)\n📚 В истории: %d из %d (/mybuilds)" % (
+    tg.send(chat, profile_text(uid) + "\n\n%s\n%s\nСервис: %s\nИИ: %s (сменить: /model)\n📚 В истории: %d из %d (/mybuilds)" % (
         t, pr, m, mname(user_model(uid)), len(mb_list(uid)[:mb_limit(uid)]), mb_limit(uid)))
 
 
