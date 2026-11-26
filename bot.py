@@ -1346,7 +1346,7 @@ def _furn_desc(nm, fk):
     p = nm.split(":")
     b = p[0]
     if b not in _FT_BASE:
-        return None
+        return _real_desc(b)
     pre, has_front = _FT_BASE[b]
     rot = _FROT[fk % 4]
     d = {"hf": 1.0, "fvec": None, "top": pre + "_top", "side": pre + "_side", "front": None, "otop": None, "emis": b == "lit_pumpkin"}
