@@ -5250,7 +5250,7 @@ PUB_KEEP = int(_env("PUB_KEEP", "300"))                  # сколько пуб
 
 def pub_markup(pid, likes):
     """Кнопки под постом в канале: лайк (считает бот) и скачивание (ссылка в бота: так работает и у тех, кто ещё не запускал его)."""
-    rows = [[{"text": "👍 %d" % likes, "callback_data": "lk:" + pid}]]
+    rows = [[{"text": "👍 %d" % likes, "callback_data": "cl:" + pid}]]
     if BOT_USERNAME:
         rows.append([{"text": "⬇️ Скачать мир", "url": "https://t.me/%s?start=dl_%s" % (BOT_USERNAME, pid)},
                      {"text": "📦 Структура", "url": "https://t.me/%s?start=ds_%s" % (BOT_USERNAME, pid)}])
