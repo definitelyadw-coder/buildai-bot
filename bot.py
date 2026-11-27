@@ -5245,6 +5245,112 @@ def on_callback_publish(cq, data):
     FAST.submit(job_publish, chat, uid, bid)
 
 
+PUB_KEEP = int(_env("PUB_KEEP", "300"))                  # сколько публикаций держим для скачивания из канала (старые удаляются)
+
+
+def pub_markup(pid, likes):
+    """Кнопки под постом в канале: лайк (считает бот) и скачивание (ссылка в бота: так работает и у тех, кто ещё не запускал его)."""
+    rows = [[{"text": "👍 %d" % likes, "callback_data": "lk:" + pid}]]
+    if BOT_USERNAME:
+        rows.append([{"text": "⬇️ Скачать мир", "url": "https://t.me/%s?start=dl_%s" % (BOT_USERNAME, pid)},
+                     {"text": "📦 Структура", "url": "https://t.me/%s?start=ds_%s" % (BOT_USERNAME, pid)}])
+    return {"inline_keyboard": rows}
+
+
+def pub_save(pid, uid, b, res):
+    """Постройка копируется в отдельное хранилище: из канала её можно скачать, даже когда она пропала из /mybuilds."""
+    try:
+        with S.lock:
+            P = S.d.setdefault("pubposts", {})
+            P[pid] = {"uid": uid, "zs": b.get("zs") or pack_spec(bspec(b)), "prem": bool(b.get("prem")), "zoom": int(b.get("zoom") or 1),
+                      "nm": mb_name(b), "likes": [], "dl": 0, "ts": now_ts(), "mid": int((res or {}).get("message_id") or 0)}
+            for old in sorted(P, key=lambda k: P[k]["ts"])[:max(0, len(P) - PUB_KEEP)]:
+                P.pop(old, None)
+        S.save()
+    except Exception:
+        log.error("pub_save: %s", traceback.format_exc())
+
+
+def on_callback_like(cq, data):
+    uid, msg = cq["from"]["id"], cq["message"]
+    pid, n, mine = data.partition(":")[2], None, False
+    with S.lock:
+        p = (S.d.get("pubposts") or {}).get(pid)
+        if p is not None:
+            lk = p["likes"]
+            if uid in lk:
+                lk.remove(uid)
+            else:
+                lk.append(uid)
+                mine = True
+            n = len(lk)
+    if n is None:
+        return _ans(cq, "Эта публикация устарела.")
+    S.save()
+    _ans(cq, "👍 Лайк поставлен" if mine else "Лайк убран")
+    try:
+        tg.call("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"], "message_id": msg["message_id"], "reply_markup": pub_markup(pid, n)}, tries=1)
+    except Exception:
+        pass
+
+
+def _pub_hook(msg):
+    """/start dl_<id> (мир) или /start ds_<id> (.mcstructure): ссылка из кнопки под постом в канале."""
+    m = re.match(r"^/start(?:@\w+)?\s+(dl|ds)_([0-9a-f]{4,12})\s*$", (msg.get("text") or "").strip(), re.I)
+    if not m or not msg.get("from"):
+        return False
+    u, chat = msg["from"], msg["chat"]["id"]
+    uid, kind, pid = u["id"], m.group(1).lower(), m.group(2).lower()
+    touch_user(u)
+    blk = service_block(uid)
+    if blk:
+        tg.send(chat, blk)
+        return True
+    if uid in S.d["banned"]:
+        tg.send(chat, "🚫 Доступ закрыт.")
+        return True
+    if not (S.d.get("pubposts") or {}).get(pid):
+        tg.send(chat, "Эта публикация уже недоступна.")
+        return True
+    kk = (uid, pid, "dl", 1)
+    if time.time() - ACTIVE_FILES.get(kk, 0) < 10:
+        return True
+    ACTIVE_FILES[kk] = time.time()
+    FAST.submit(job_pub_download, chat, uid, kind, pid)
+    return True
+
+
+def job_pub_download(chat, uid, kind, pid):
+    p = (S.d.get("pubposts") or {}).get(pid)
+    if not p:
+        return
+    try:
+        with VIEW_SEM:
+            r = run_spec_for_build({"zs": p["zs"], "prem": p["prem"], "zoom": p["zoom"]})
+        name = p.get("nm") or "build"
+        if kind == "ds":
+            if r.g.size > 4000000:
+                return tg.send(chat, "📦 Эта постройка слишком большая для .mcstructure. Скачай мир: кнопка «Скачать мир» под постом.")
+            tg.doc(chat, mcstructure_bytes(r), safe_name(name) + ".mcstructure",
+                   "📦 %s — структура Bedrock. В игре: Блок структуры → Загрузка/Импорт." % name)
+            key = "structs"
+        else:
+            tg.doc(chat, build_mcworld_bytes(r, ("BuildAI " + name)[:40], world_opts(uid)), safe_name(name) + ".mcworld",
+                   "🌍 %s — мир для Minecraft Bedrock 1.21.50 из канала @%s.\n\nОткрой файл в Minecraft (на телефоне: «Поделиться» → Minecraft). "
+                   "Постройка стоит в 8 блоках на восток от места появления.\n\nХочешь свою? Напиши /build и опиши, что построить." % (name, USERS_CHANNEL))
+            key = "worlds"
+        with S.lock:
+            S.d["stats"][key] += 1
+            p["dl"] = int(p.get("dl", 0) or 0) + 1
+        S.save()
+    except Exception:
+        log.error("job_pub_download: %s", traceback.format_exc())
+        try:
+            tg.send(chat, "⚠️ Не получилось собрать файл, попробуй ещё раз.")
+        except Exception:
+            pass
+
+
 def job_publish(chat, uid, bid):
     with S.lock:
         b = S.d["builds"].get(bid)
