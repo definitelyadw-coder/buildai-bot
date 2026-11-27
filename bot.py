@@ -2840,7 +2840,11 @@ TEACH = (" FURNISHING: furniture must work in the game. Keep one free air block 
          "make the roof a different colour from the walls, stepped in layers, overhanging the walls by 1 block, with a visible ridge. Never leave a flat wall: add a bay, porch, "
          "balcony, recess or wing every 5-8 blocks so the walls have depth, and vary the height (a taller tower or a second floor part). Emphasise the entrance with a porch, two pillars "
          "and lamps. Add lights (lantern, glowstone, sea_lantern) outside and inside, a chimney, a fence, a path and a garden with leaves. Windows come in symmetric pairs or rows, "
-         "with a sill and a frame of another material. Floors differ from walls (planks inside, stone outside). Prefer a clear readable silhouette over many random details.")
+         "with a sill and a frame of another material. Floors differ from walls (planks inside, stone outside). Prefer a clear readable silhouette over many random details."
+         " HEIGHTS AND ENTRANCE: the ceiling inside must have at least 4 blocks of air above the floor (5 for a hall, church or shop), so walls are 5-6 blocks tall; the roof then rises 3-6 more blocks "
+         "above the top of the walls and must be clearly visible from outside, never a flat lid. The floor is ONE flat layer at one single height for the whole house, including the doorway and the porch: "
+         "never put a raised block, step, threshold or half-floor in the doorway or just inside it. The 2-high door hole starts directly on the floor level. Keep a free path of air from the door into the room; "
+         "if the house stands higher than the ground, put 1-2 steps going DOWN outside, never blocks standing in the way.")
 
 
 # ===VISION-BLOCK===
