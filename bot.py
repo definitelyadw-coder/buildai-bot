@@ -554,6 +554,10 @@ def run_spec(spec, prem=False):
         sub[...] = v
         if o["t"] == "hollow" and min(x2 - x1, y2 - y1, z2 - z1) >= 2:
             sub[1:-1, 1:-1, 1:-1] = 0
+    try:
+        fix_windows(T, pal, pi)
+    except Exception:
+        log.error("fix_windows: %s", traceback.format_exc())
     nzx, nzy, nzz = T.any(axis=(1, 2)), T.any(axis=(0, 2)), T.any(axis=(0, 1))
     if not nzx.any():
         raise ValueError("Постройка пустая")
