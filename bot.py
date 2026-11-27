@@ -5262,7 +5262,7 @@ def pub_save(pid, uid, b, res):
     try:
         with S.lock:
             P = S.d.setdefault("pubposts", {})
-            P[pid] = {"uid": uid, "zs": b.get("zs") or pack_spec(bspec(b)), "prem": bool(b.get("prem")), "zoom": int(b.get("zoom") or 1),
+            P[pid] = {"uid": uid, "zs": b.get("zs"), "spec": b.get("spec"), "prem": bool(b.get("prem")), "zoom": int(b.get("zoom") or 1),
                       "nm": mb_name(b), "likes": [], "dl": 0, "ts": now_ts(), "mid": int((res or {}).get("message_id") or 0)}
             for old in sorted(P, key=lambda k: P[k]["ts"])[:max(0, len(P) - PUB_KEEP)]:
                 P.pop(old, None)
