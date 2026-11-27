@@ -5366,6 +5366,8 @@ def on_callback(cq):
         return tg.call("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Доступ закрыт.", "show_alert": True})
     if data.startswith("lk:"):
         return on_callback_rate(cq, data)
+    if data.startswith("hv:"):
+        return hv_callback(cq, data)
     if data.startswith("pb:"):
         return on_callback_publish(cq, data)
     if data.startswith("fr:"):
