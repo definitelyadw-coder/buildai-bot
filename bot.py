@@ -1896,7 +1896,9 @@ def floor_layer(r):
 def build_world_files(r, title, opts=None):
     """Возвращает {путь внутри архива: bytes} для .mcworld."""
     X, Y, Z = r.d
-    BX, BY, BZ = 8, -60, -(Z // 2)                       # угол постройки в мире
+    BX, BZ = 8, -(Z // 2)                                # угол постройки в мире
+    fl_ = floor_layer(r)
+    BY = -61 - fl_ if fl_ is not None else -60           # пол вровень с травой (y=-61); без пола постройка стоит на траве
     # палитра мира
     ground = (opts or {}).get("g") or "grass_block"
     names = ["air", "bedrock", "dirt", ground]
