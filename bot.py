@@ -2592,6 +2592,9 @@ def web_refs(q):
     if res(fd):
         parts += ["• %s — %s" % t for t in res(fd)]
         src.append("DuckDuckGo")
+    if res(fm):
+        parts += ["• [Minecraft] %s — %s" % t for t in res(fm)]
+        src.append("Minecraft-гайды")
     return "\n".join(parts)[:4000], src
 
 
