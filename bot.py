@@ -501,6 +501,39 @@ def fix_windows(T, pal, pi):
     return n
 
 
+# ===FIXFURN-BLOCK===
+def fix_furniture(T, pal):
+    """Мебель, стоящая в одном слое с полом (пол вокруг вровень с ней), поднимается на 1 блок выше, а на её месте остаётся пол.
+    Признак: над мебелью воздух, а в слое мебели в окне 5×5 много сплошных блоков с воздухом над ними (это и есть пол).
+    Возвращает, сколько блоков мебели поднято."""
+    furn = [i for i, n in enumerate(pal) if i and (n.split(":")[0] in _FT_BASE or n.startswith("bed"))]
+    if not furn:
+        return 0
+    pts = np.argwhere(np.isin(T, furn))
+    if len(pts) == 0 or len(pts) > 4000:
+        return 0
+    lo = np.maximum(pts.min(axis=0) - 3, 0)
+    hi = pts.max(axis=0) + 4
+    sub = T[lo[0]:hi[0], lo[1]:hi[1] + 1, lo[2]:hi[2]]
+    if sub.size > 6000000:
+        return 0
+    solid = [i for i, n in enumerate(pal) if i and i not in furn and n in D and D[n][2] not in ("g", "t")]
+    fl = np.isin(sub, solid) & _sh(sub == 0, 1, 1, True)           # сплошные блоки, над которыми воздух: поверхность пола
+    n = 0
+    for x, y, z in (pts - lo):
+        if y + 1 >= sub.shape[1] or sub[x, y + 1, z] != 0:
+            continue
+        x0, z0 = max(0, x - 2), max(0, z - 2)
+        win = fl[x0:x + 3, y, z0:z + 3]
+        if int(win.sum()) < 5:
+            continue
+        floor_id = int(np.bincount(sub[x0:x + 3, y, z0:z + 3][win]).argmax())
+        sub[x, y + 1, z] = sub[x, y, z]
+        sub[x, y, z] = floor_id
+        n += 1
+    return n
+
+
 def run_spec(spec, prem=False):
     """Превращает JSON ИИ в сетку блоков. Результат: ops, pal, g[x,y,z], d=(X,Y,Z), n, unk, bad."""
     if not isinstance(spec, dict):
