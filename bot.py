@@ -589,6 +589,7 @@ def run_spec(spec, prem=False):
             sub[1:-1, 1:-1, 1:-1] = 0
     try:
         fix_windows(T, pal, pi)
+        fix_furniture(T, pal)
     except Exception:
         log.error("fix_windows: %s", traceback.format_exc())
     nzx, nzy, nzz = T.any(axis=(1, 2)), T.any(axis=(0, 2)), T.any(axis=(0, 1))
