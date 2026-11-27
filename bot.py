@@ -5302,9 +5302,8 @@ def _pub_hook(msg):
     u, chat = msg["from"], msg["chat"]["id"]
     uid, kind, pid = u["id"], m.group(1).lower(), m.group(2).lower()
     touch_user(u)
-    blk = service_block(uid)
-    if blk:
-        tg.send(chat, blk)
+    if S.d["mode"] == "off" and not is_admin(uid):
+        tg.send(chat, "Сервис сейчас выключен, попробуй позже.")
         return True
     if uid in S.d["banned"]:
         tg.send(chat, "🚫 Доступ закрыт.")
