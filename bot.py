@@ -5325,7 +5325,7 @@ def job_pub_download(chat, uid, kind, pid):
         return
     try:
         with VIEW_SEM:
-            r = run_spec_for_build({"zs": p["zs"], "prem": p["prem"], "zoom": p["zoom"]})
+            r = run_spec_for_build({"zs": p.get("zs"), "spec": p.get("spec"), "prem": p["prem"], "zoom": p["zoom"]})
         name = p.get("nm") or "build"
         if kind == "ds":
             if r.g.size > 4000000:
