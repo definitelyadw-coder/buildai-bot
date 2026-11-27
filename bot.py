@@ -4604,6 +4604,92 @@ def cmd_mybuilds(chat, uid, msg):
     tg.send(chat, mb_text(uid, 0), mb_markup(uid, 0))
 
 
+def chain_of(bid):
+    """Все версии постройки от самой первой до последней: [первая, ..., последняя]. Версии связаны полем par (из какой сделана правка)."""
+    B = S.d["builds"]
+    if bid not in B:
+        return []
+    kid = {}
+    for x, b in B.items():
+        p = b.get("par")
+        if p and p in B and x != p:
+            kid.setdefault(p, x)
+    root = bid
+    for _ in range(60):
+        p = B[root].get("par")
+        if not p or p not in B:
+            break
+        root = p
+    out = [root]
+    while out[-1] in kid and len(out) < 60:
+        out.append(kid[out[-1]])
+    return out
+
+
+def hv_markup(bid, ch):
+    i = ch.index(bid)
+    nav = []
+    if i > 0:
+        nav.append({"text": "⬅️ Назад", "callback_data": "hv:g:" + ch[i - 1]})
+    nav.append({"text": "%d/%d" % (i + 1, len(ch)), "callback_data": "hv:n"})
+    if i < len(ch) - 1:
+        nav.append({"text": "Вперёд ➡️", "callback_data": "hv:g:" + ch[i + 1]})
+    return {"inline_keyboard": [nav, [{"text": "✅ Беру эту версию", "callback_data": "ok:" + bid}, {"text": "📦 .mcstructure", "callback_data": "st:" + bid}]]}
+
+
+def hv_caption(bid, ch, r):
+    i, b = ch.index(bid), S.d["builds"][bid]
+    return "🕘 %s · версия %d из %d%s\n🧱 %d блоков · %d×%d×%d · %s\n💬 %s: «%s»" % (
+        mb_name(b), i + 1, len(ch), " (последняя)" if i == len(ch) - 1 else "", r.n, *r.d, mb_ago(b["ts"]),
+        "Запрос" if i == 0 else "Правка", clean_text(b.get("q"))[:120])
+
+
+def job_hist(chat, uid, bid, mid=None):
+    b = S.d["builds"].get(bid)
+    if not b:
+        return
+    try:
+        ch = chain_of(bid)
+        with VIEW_SEM:
+            r = run_spec_for_build(b)
+            png = render_preview_any(r)
+        cap, mk = hv_caption(bid, ch, r), hv_markup(bid, ch)
+        if mid:
+            try:                                           # листаем: заменяем картинку в том же сообщении
+                tg.call("editMessageMedia", {"chat_id": chat, "message_id": mid, "media": {"type": "photo", "media": "attach://f", "caption": cap[:1000]},
+                                             "reply_markup": mk}, files={"f": ("v.png", png, "image/png")}, timeout=60, tries=2)
+                return
+            except TGError as e:
+                if "not modified" in str(e):
+                    return
+        tg.photo(chat, png, cap, mk)
+    except Exception:
+        log.error("job_hist: %s", traceback.format_exc())
+        try:
+            tg.send(chat, "⚠️ Не получилось открыть версию, попробуй ещё раз.")
+        except Exception:
+            pass
+
+
+def hv_callback(cq, data):
+    uid, chat, mid = cq["from"]["id"], cq["message"]["chat"]["id"], cq["message"]["message_id"]
+    parts = data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    if act == "n":
+        return _ans(cq)
+    b = S.d["builds"].get(parts[2]) if len(parts) > 2 else None
+    if act not in ("o", "g") or not b:
+        return _ans(cq, "Эта версия уже недоступна. Открой список заново: /mybuilds", True)
+    if b.get("uid") != uid and not is_admin(uid):
+        return _ans(cq, "Это чужая постройка.", True)
+    kk = (uid, parts[2], "hv", 1)
+    if time.time() - ACTIVE_FILES.get(kk, 0) < 3:
+        return _ans(cq, "Секунду…")
+    ACTIVE_FILES[kk] = time.time()
+    _ans(cq, "Открываю…")
+    FAST.submit(job_hist, chat, uid, parts[2], mid if act == "g" else None)
+
+
 def job_open(chat, uid, bid):
     b = S.d["builds"].get(bid)
     if not b:
