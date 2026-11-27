@@ -2011,7 +2011,7 @@ START_TS = time.time()
 def default_state():
     return {"v": 1, "mode": "on", "mode_msg": "", "model": TH_MODEL, "keys": [], "limit": DAILY_LIMIT,
             "banned": [], "users": {}, "builds": {}, "last": {}, "seq": 0, "bk_msg": 0,
-            "cf": [], "cfdead": {}, "rate": {}, "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
+            "cf": [], "cfdead": {}, "rate": {}, "kb": [], "pubposts": {}, "prem": {}, "prem_limit": PREM_LIMIT_DEFAULT, "prem_wait": {}, "pay": {}, "prices": {},
             "stats": {"builds": 0, "ok": 0, "fail": 0, "worlds": 0, "structs": 0}}
 
 
