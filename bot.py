@@ -4189,7 +4189,9 @@ def premium_callback(cq, data):
         return True
     if key == "up":
         _ans(cq, "Улучшаю…")
-        try_start_build(chat, uid, IMPROVE_Q, bhist(b))
+        EDIT_PAR[uid] = bid
+        if try_start_build(chat, uid, IMPROVE_Q, bhist(b)):      # отказ (лимит, пауза, очередь): улучшение не началось
+            EDIT_PAR.pop(uid, None)
         return True
     k = int(parts[2]) if key == "zm" and len(parts) > 2 and parts[2] in ("2", "3") else 1
     kk = (uid, bid, key, k)
