@@ -33,7 +33,7 @@ ADMIN_IDS      = [int(x) for x in re.findall(r"-?\d+", _env("ADMIN_IDS", "885939
 ADMIN_NAME     = _env("ADMIN_USERNAME", "cleanminder").lstrip("@")      # только для показа, доступ — по ID
 TG_API         = _env("TG_API", "https://api.telegram.org").rstrip("/")
 TH_URL         = _env("TH_URL", "https://tokenharbor.ai/v1/chat/completions")
-BOT_VERSION = "3.10.2-ground"
+BOT_VERSION = "3.10.3-edits"
 TASK_CHANNEL = _env("TASK_CHANNEL", "BuildMineAiBot").replace("https://t.me/", "").lstrip("@").strip("/")   # канал для задания
 USERS_CHANNEL = _env("USERS_CHANNEL", "Usersbuildai").replace("https://t.me/", "").lstrip("@").strip("/")   # канал, куда игроки публикуют постройки
 PUB_DAILY = int(_env("PUB_DAILY", "5"))                   # сколько публикаций в канал в сутки на человека (0 = без лимита)
