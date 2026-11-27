@@ -3121,7 +3121,7 @@ def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
         tg.safe_edit(chat, mid, "🎨 Построено %s блоков. Рисую предпросмотр…" % fmt_int(r.n))
         png = render_preview_any(r)
         hist = [{"role": "user", "content": q}, {"role": "assistant", "content": json.dumps({"name": spec.get("name", "build"), "ops": spec.get("ops", [])}, ensure_ascii=False)}]
-        bid = store_build(uid, q, spec, hist, prem, meta={"n": int(r.n), "dm": [int(v) for v in r.d], "mdl": ctx.get("vmodel") or model})
+        bid = store_build(uid, q, spec, hist, prem, meta={"n": int(r.n), "dm": [int(v) for v in r.d], "mdl": ctx.get("vmodel") or model, "par": par_})
         cap = "✅ %s\n🧱 %d блоков · %d×%d×%d\n🤖 %s (сменить: /model)" % (spec.get("name") or "Постройка", r.n, *r.d, mname(ctx.get("vmodel") or model))
         if fb_from:
             cap += "\n↪️ %s не справилась, построила %s" % (rate_name(fb_from), rate_name(model))
