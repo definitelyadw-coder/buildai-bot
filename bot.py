@@ -5094,6 +5094,8 @@ def job_publish(chat, uid, bid):
 
 
 def on_message(msg):
+    if _basel_hook(msg):
+        return
     u, chat = msg.get("from"), msg["chat"]
     if not u or u.get("is_bot"):
         return
