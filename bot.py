@@ -3209,7 +3209,9 @@ def cmd_edit(chat, uid, arg, reply_to):
     b = S.d["builds"].get(bid) if bid else None
     if not b:
         return tg.send(chat, "Сначала построй что-нибудь: /build <описание>")
-    try_start_build(chat, uid, q, bhist(b), reply_to)
+    EDIT_PAR[uid] = bid
+    if try_start_build(chat, uid, q, bhist(b), reply_to):      # отказ (лимит, пауза, очередь): правка не началась
+        EDIT_PAR.pop(uid, None)
 
 
 def model_text(uid):
