@@ -2617,9 +2617,9 @@ def user_enh(uid):
     return bool((S.d["users"].get(str(uid)) or {}).get("enh", True))
 
 
-def enhance_prompt(q, cancel):
+def enhance_prompt(q, cancel, kb=""):
     """Короткий запрос -> подробный план от модели-улучшателя. Бросает LLMError, если ни одна модель не ответила."""
-    msgs = [{"role": "system", "content": ENH_SYS}, {"role": "user", "content": q}]
+    msgs = [{"role": "system", "content": ENH_SYS}, {"role": "user", "content": q + (("\n\nNotes from the knowledge base (use the relevant ones, ignore the rest):\n" + kb) if kb else "")}]
     order = [ENH_MODEL] + [m for m in MODEL_IDS if m != ENH_MODEL]
     last = None
     for m in order[:3]:
