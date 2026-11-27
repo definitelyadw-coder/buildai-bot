@@ -2659,7 +2659,7 @@ ENH_MAXLEN = int(_env("ENHANCE_MAXLEN", "220"))            # запросы дл
 ENH_SYS = ("You are a senior Minecraft architect who writes build briefs for another AI builder. The builder works in Minecraft Bedrock 1.21.50 with FULL BLOCKS only "
            "(no stairs, slabs or doors) using fill, hollow, cylinder, sphere, line, mirror and repeat operations; at most 128 blocks per axis, 1 block = 1 metre. "
            "Turn the player's short request into ONE clear design brief:\n"
-           "1) What it is, its style and overall silhouette, and an exact size in blocks (width x depth x height). Choose realistic sizes: a house about 15-25 wide and 8-14 tall with the roof, "
+           "1) What it is, its style and overall silhouette, and an exact size in blocks (width x depth x height). Choose realistic sizes: a house about 15-25 wide, walls 5-6 tall (4-5 blocks of air inside under the ceiling) and a roof adding 3-6 more, 10-16 tall in total, "
            "a tower 7-11 wide, a castle 50-80 wide.\n"
            "2) Materials: 3-5 blocks for walls, floor, roof, trim, windows and lights. Use ONLY block names from this list: " + ", ".join(D.keys()) + ".\n"
            "3) Structure from bottom to top: foundation, walls, corner pillars, the roof shape and its height layers, windows (how many and where; each window is a hole through the WHOLE wall thickness filled with glass, never leave wall blocks inside an opening), the door opening, chimney or towers.\n"
