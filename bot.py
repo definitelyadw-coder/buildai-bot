@@ -4483,9 +4483,9 @@ def mb_limit(uid):
 def trim_builds(uid):
     """Вызывать под S.lock. Оставляем у игрока только положенное число последних построек + общий предохранитель."""
     B = S.d["builds"]
-    mine = sorted((x for x in B if B[x].get("uid") == uid), key=_bseq, reverse=True)
-    for x in mine[mb_limit(uid):]:
-        B.pop(x, None)
+    _prune_chain(B)
+    for x in mb_list(uid)[mb_limit(uid):]:
+        _drop_chain(B, x)
     if len(B) > MB_GLOBAL:
         order = sorted(B, key=lambda x: (bool(is_prem(B[x].get("uid"))), _bseq(x)))
         for x in order[:len(B) - MB_GLOBAL]:
