@@ -5362,7 +5362,9 @@ def job_publish(chat, uid, bid):
         with VIEW_SEM:
             r = run_spec_for_build(b)
             png = render_preview_any(r)
-        tg.photo("@" + USERS_CHANNEL, png, pub_caption(b, uid, r))
+        pid = secrets.token_hex(3)
+        res = tg.photo("@" + USERS_CHANNEL, png, pub_caption(b, uid, r), pub_markup(pid, 0))
+        pub_save(pid, uid, b, res)
     except Exception as e:
         err = e
         log.error("job_publish: %s", traceback.format_exc())
