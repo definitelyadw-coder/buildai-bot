@@ -2995,6 +2995,8 @@ def build_markup(bid, prem=False, rate=None):
         rows.append([{"text": "⭐ Premium: карты до 384×384, 15 в день", "callback_data": "pl:pm"}])
     if USERS_CHANNEL:
         rows.append([{"text": "📢 Опубликовать в канале", "callback_data": "pb:" + bid}])
+    if (S.d["builds"].get(bid) or {}).get("par"):
+        rows.append([{"text": "🕘 История постройки", "callback_data": "hv:o:" + bid}])
     rows.append([{"text": "🔁 Заново", "callback_data": "re:" + bid}, {"text": "📦 .mcstructure", "callback_data": "st:" + bid}])
     return {"inline_keyboard": rows}
 
