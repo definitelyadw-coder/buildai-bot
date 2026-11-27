@@ -3056,6 +3056,9 @@ def try_start_build(chat, uid, q, history=None, reply_to=None):
 
 
 def job_build(chat, uid, q, history, cancel, charge=True, slot="free"):
+    par_ = EDIT_PAR.pop(uid, None)                       # из какой постройки сделана правка /edit
+    if not history:
+        par_ = None
     t0 = time.time()
     mid = None
     refund = True
