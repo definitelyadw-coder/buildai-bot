@@ -2638,6 +2638,58 @@ def enhance_prompt(q, cancel):
     return ""
 
 
+# ===BASEL-BLOCK===
+# ─── /basel: база знаний. Админ добавляет заметки (приёмы, пропорции, примеры домов); на каждой постройке подбираются нужные и уходят модели как справка.
+KB_MAX, KB_LIMIT = 80, 3500                      # заметок всего / символов базы в одном запросе
+
+
+def kb_pick(q, limit=KB_LIMIT):
+    kb = S.d.get("kb") or []
+    if not kb:
+        return ""
+    items = list(kb)
+    if sum(len(e["t"]) for e in items) > limit:   # не влезает целиком: сначала самые подходящие по словам запроса
+        w = set(re.findall(r"\w{3,}", q.lower()))
+        items.sort(key=lambda e: len(w & set(re.findall(r"\w{3,}", e["t"].lower()))), reverse=True)
+    out, n = [], 0
+    for e in items:
+        if n + len(e["t"]) <= limit:
+            out.append("• " + e["t"])
+            n += len(e["t"])
+    return "\n".join(out)
+
+
+def _basel_hook(msg):
+    """/basel текст: добавить заметку; /basel: список; /basel del N: удалить; /basel clear: очистить. Только админ."""
+    m = re.match(r"^/basel(?:@\w+)?(?:\s+([\s\S]*))?$", (msg.get("text") or "").strip(), re.I)
+    if not m or not msg.get("from"):
+        return False
+    uid, chat = msg["from"]["id"], msg["chat"]["id"]
+    if not is_admin(uid):
+        tg.send(chat, "Команда /basel доступна только админу.")
+        return True
+    arg = (m.group(1) or "").strip()
+    with S.lock:
+        kb = S.d.setdefault("kb", [])
+        if not arg:
+            txt = "📚 База знаний пуста. Добавь: /basel текст" if not kb else "📚 База знаний (%d):\n" % len(kb) + "\n".join(
+                "%d. %s" % (i + 1, e["t"][:90].replace("\n", " ") + ("…" if len(e["t"]) > 90 else "")) for i, e in enumerate(kb)) + "\n\nУдалить: /basel del N · очистить: /basel clear"
+        elif arg.lower() == "clear":
+            kb.clear()
+            txt = "🗑 База знаний очищена."
+        elif re.match(r"^del\s+\d+$", arg, re.I):
+            i = int(arg.split()[1]) - 1
+            txt = ("🗑 Удалено: " + kb.pop(i)["t"][:60]) if 0 <= i < len(kb) else "Нет заметки с таким номером."
+        elif len(kb) >= KB_MAX:
+            txt = "База заполнена (%d). Удали лишнее: /basel del N" % KB_MAX
+        else:
+            kb.append({"t": arg[:1500], "ts": now_ts()})
+            txt = "✅ Добавлено в базу знаний (%d). ИИ будет брать её на постройках, когда тема подходит." % len(kb)
+    S.save()
+    tg.send(chat, txt)
+    return True
+
+
 def prepare_ctx(uid, q, history, jx, status, cancel):
     ctx = {"imgs": [], "refs": "", "src": [], "want_img": bool(jx.get("imgs"))}
     if ctx["want_img"]:
