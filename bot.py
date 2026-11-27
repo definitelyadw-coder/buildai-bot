@@ -1929,7 +1929,10 @@ def build_world_files(r, title, opts=None):
             z0, z1 = max(wz0, BZ), min(wz0 + 16, BZ + Z)
             if x0 < x1 and z0 < z1:
                 y0 = BY - WORLD_MIN_Y
-                col[x0 - wx0:x1 - wx0, y0:y0 + Y, z0 - wz0:z1 - wz0] = G[x0 - BX:x1 - BX, :, z0 - BZ:z1 - BZ]
+                reg = G[x0 - BX:x1 - BX, :, z0 - BZ:z1 - BZ]
+                tgt = col[x0 - wx0:x1 - wx0, y0:y0 + Y, z0 - wz0:z1 - wz0]
+                keep = (reg == 0) & ((np.arange(Y) + y0 <= 3)[None, :, None])      # воздух постройки не вырезает землю на уровне травы и ниже
+                col[x0 - wx0:x1 - wx0, y0:y0 + Y, z0 - wz0:z1 - wz0] = np.where(keep, tgt, reg)
             key = struct.pack("<ii", cx, cz)
             if be_chunks.get((cx, cz)):
                 items[key + b"\x31"] = be_chunks[(cx, cz)]                    # блок-сущности (сундуки, кровати)
