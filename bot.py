@@ -2606,7 +2606,7 @@ ENH_SYS = ("You are a senior Minecraft architect who writes build briefs for ano
            "1) What it is, its style and overall silhouette, and an exact size in blocks (width x depth x height). Choose realistic sizes: a house about 15-25 wide and 8-14 tall with the roof, "
            "a tower 7-11 wide, a castle 50-80 wide.\n"
            "2) Materials: 3-5 blocks for walls, floor, roof, trim, windows and lights. Use ONLY block names from this list: " + ", ".join(D.keys()) + ".\n"
-           "3) Structure from bottom to top: foundation, walls, corner pillars, the roof shape and its height layers, windows (how many and where), the door opening, chimney or towers.\n"
+           "3) Structure from bottom to top: foundation, walls, corner pillars, the roof shape and its height layers, windows (how many and where; each window is a hole through the WHOLE wall thickness filled with glass, never leave wall blocks inside an opening), the door opening, chimney or towers.\n"
            "4) Interior: rooms with their purpose and the furniture in each (chest, bed, furnace, crafting_table, bookshelf and so on), lighting.\n"
            "5) Outside details: garden, fence, path, lamps, trees.\n"
            "Keep everything the player asked for (style, colours, size, features) and add only what fits it. If the request is a creature, vehicle or object, describe its recognizable "
