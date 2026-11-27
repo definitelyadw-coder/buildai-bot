@@ -1880,6 +1880,19 @@ def _world_bes(r, BX, BY, BZ):
     return {k: b"".join(v) for k, v in ch.items()}
 
 
+def floor_layer(r):
+    """Номер слоя постройки (0..2), который является полом/фундаментом: он ляжет вровень с травой, и в дом входят без прыжка.
+    Пол = первый слой, где занято не меньше 20% площади, а следующий слой заметно реже (там стены и комнаты). None: пола нет (дерево, статуя), строим на земле."""
+    if _env("WORLD_FLUSH", "1") == "0":
+        return None
+    X, Y, Z = r.d
+    occ = [int(np.count_nonzero(r.g[:, y, :])) / float(X * Z) for y in range(min(Y, 4))]
+    for y in range(min(3, len(occ) - 1)):
+        if occ[y] >= 0.2 and occ[y + 1] < 0.7 * occ[y]:
+            return y
+    return None
+
+
 def build_world_files(r, title, opts=None):
     """Возвращает {путь внутри архива: bytes} для .mcworld."""
     X, Y, Z = r.d
