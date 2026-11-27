@@ -4492,9 +4492,35 @@ def trim_builds(uid):
             B.pop(x, None)
 
 
+EDIT_PAR = {}                                              # uid -> id постройки, которую сейчас правят через /edit
+
+
+def _drop_chain(B, x):
+    """Удаляет постройку вместе со всеми её прошлыми версиями (правками /edit)."""
+    for _ in range(50):
+        if not x or x not in B:
+            break
+        x = B.pop(x).get("par")
+
+
+def _prune_chain(B, keep=6):
+    """У одной постройки с правками храним не больше keep последних версий."""
+    hid = {b.get("par") for b in B.values() if b.get("par")}
+    for h in [x for x in B if x not in hid]:
+        x, n = h, 1
+        while x in B and B[x].get("par") in B:
+            x, n = B[x]["par"], n + 1
+            if n >= keep:
+                _drop_chain(B, B[x].get("par"))
+                B[x]["par"] = None
+                break
+
+
 def mb_list(uid):
+    """Постройки игрока, новые сверху. Версии, из которых сделали правку /edit, скрыты: постройка с правками считается за одну."""
     B = S.d["builds"]
-    return sorted((x for x in B if B[x].get("uid") == uid), key=_bseq, reverse=True)
+    hid = {b.get("par") for b in B.values() if b.get("par")}
+    return sorted((x for x in B if B[x].get("uid") == uid and x not in hid), key=_bseq, reverse=True)
 
 
 def mb_name(b):
