@@ -2782,7 +2782,13 @@ TEACH = (" FURNISHING: furniture must work in the game. Keep one free air block 
          "through the WHOLE wall thickness (a window is a hole: never leave a wall block behind or inside it); 3) then fill each window hole with glass in the same plane as the wall; "
          "4) then furniture and details. Later ops overwrite earlier ones, so never run a fill, hollow or repeat over a finished window or door. Keep walls 1 block thick unless the player asks "
          "for thick walls; if a wall is 2 thick, the window goes through both layers. A door is a hole of air 1 wide and 2 high from the floor, never glass. Windows start at least 1 block above the floor, "
-         "are 1x2 or 2x2, evenly spaced and aligned in rows.")
+         "are 1x2 or 2x2, evenly spaced and aligned in rows."
+         " DESIGN QUALITY (a build must look like a real designer made it, never a plain box): use at most 3-4 materials in a 60/30/10 split (main wall, frame or trim, accent). "
+         "Frame every corner and roof edge with a contrasting column or beam (logs, stripped logs, stone_bricks); put a stone or cobblestone base layer under the walls; "
+         "make the roof a different colour from the walls, stepped in layers, overhanging the walls by 1 block, with a visible ridge. Never leave a flat wall: add a bay, porch, "
+         "balcony, recess or wing every 5-8 blocks so the walls have depth, and vary the height (a taller tower or a second floor part). Emphasise the entrance with a porch, two pillars "
+         "and lamps. Add lights (lantern, glowstone, sea_lantern) outside and inside, a chimney, a fence, a path and a garden with leaves. Windows come in symmetric pairs or rows, "
+         "with a sill and a frame of another material. Floors differ from walls (planks inside, stone outside). Prefer a clear readable silhouette over many random details.")
 
 
 # ===VISION-BLOCK===
