@@ -2575,7 +2575,8 @@ def web_refs(q):
         fp = {u: ex.submit(_page_text, u) for u in urls}
         fw = [ex.submit(_wiki, topic, "ru"), ex.submit(_wiki, topic, "en")] if topic else []
         fd = ex.submit(_ddg, topic + " внешний вид архитектура") if topic else None
-        _fwait(list(fp.values()) + fw + ([fd] if fd else []), timeout=14)
+        fm = ex.submit(_ddg, topic + " minecraft build ideas blueprint tutorial") if topic else None
+        _fwait(list(fp.values()) + fw + [x for x in (fd, fm) if x], timeout=14)
     finally:
         ex.shutdown(wait=False)
     res = lambda f: f.result() if f is not None and f.done() and not f.exception() else None
